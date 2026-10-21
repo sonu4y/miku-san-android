@@ -51,16 +51,32 @@ jobs:
           ./godot --headless --editor --quit || true
           ./godot --headless --import || true
 
-      - name: Export APK
+      - name: Install the Android (Gradle) build template
+        run: |
+          ./godot --headless --install-android-build-template --quit || true
+          test -d android/build || (mkdir -p android/build && unzip -q "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_source.zip" -d android/build && echo "${GODOT_VERSION}.stable" > android/.build_version)
+          ls android/build | head
+
+      - name: Export APK (release, signed with the same key every build)
         env:
           GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/android/miku-debug.keystore
           GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
           GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ github.workspace }}/android/miku-debug.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
         run: |
           mkdir -p build
-          ./godot --headless --export-debug "Android" build/miku-san.apk
+          ./godot --headless --export-release "Android" build/miku-san.apk
           ls -la build
           test -s build/miku-san.apk
+
+      - name: Check the APK installs (Google's apksigner + aapt2)
+        run: |
+          BT="$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -1)"
+          "$BT/apksigner" verify --verbose build/miku-san.apk
+          "$BT/aapt2" dump badging build/miku-san.apk | grep -E "package:|sdkVersion|targetSdkVersion|uses-permission|launchable-activity"
+          "$BT/zipalign" -c -p 4 build/miku-san.apk && echo "zipalign OK"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,7 +86,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Miku-san APK (build ${{ github.run_number }})
+          tag_name: v2-build-${{ github.run_number }}
+          name: Miku-san v2 APK (build ${{ github.run_number }})
           body: Download miku-san.apk below and open it on your Android phone to install.
           files: build/miku-san.apk
