@@ -86,7 +86,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2-build-${{ github.run_number }}
-          name: Miku-san v2 APK (build ${{ github.run_number }})
+          tag_name: v3-build-${{ github.run_number }}
+          name: Miku-san v3 APK (build ${{ github.run_number }})
           body: Download miku-san.apk below and open it on your Android phone to install.
           files: build/miku-san.apk

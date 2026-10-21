@@ -91,6 +91,9 @@ var you: PanelContainer
 var you_lbl: Label
 var status_lbl: Label
 var settings_layer: Control
+var screen_margin: MarginContainer
+var kb_lift := 0.0           # how far the UI is lifted for the on-screen keyboard
+var kb_override := -1.0      # for testing without a real keyboard
 
 
 func _ready() -> void:
@@ -200,6 +203,7 @@ func _process(delta: float) -> void:
 	pump_speech()
 	if mic_on:
 		listen(delta)
+	follow_keyboard(delta)
 
 	var talking: bool = speaking or Time.get_ticks_msec() / 1000.0 < flap_until
 	var breathe := sin(t * 1.6)
@@ -257,6 +261,22 @@ func _input(event: InputEvent) -> void:
 		var size := get_viewport().get_visible_rect().size
 		var p: Vector2 = event.position
 		look = Vector2((p.x / size.x * 2 - 1) * 8, (p.y / size.y * 2 - 1) * 5)
+
+
+func follow_keyboard(delta: float) -> void:
+	# Lift the chat bubbles and message bar above the on-screen keyboard.
+	if screen_margin == null:
+		return
+	var kb_px := kb_override if kb_override >= 0.0 else float(DisplayServer.virtual_keyboard_get_height())
+	var win_h := float(DisplayServer.window_get_size().y)
+	var to_ui := ui.size.y / win_h if win_h > 0.0 else 1.0
+	var target := kb_px * to_ui
+	kb_lift = target if absf(target - kb_lift) < 1.0 else lerpf(kb_lift, target, minf(1.0, delta * 14.0))
+	screen_margin.add_theme_constant_override("margin_bottom", 18 + int(kb_lift))
+	if settings_layer:
+		var m := settings_layer.get_child(1) as MarginContainer
+		if m:
+			m.add_theme_constant_override("margin_bottom", 20 + int(kb_lift))
 
 
 func set_mood(m: String, strength := 0.75, hold := 6.0) -> void:
@@ -656,6 +676,7 @@ func build_ui() -> void:
 	margin.add_theme_constant_override("margin_top", 18 + maxi(0, safe.position.y) / 2)
 	margin.add_theme_constant_override("margin_bottom", 18)
 	ui.add_child(margin)
+	screen_margin = margin
 
 	var col := VBoxContainer.new()
 	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
