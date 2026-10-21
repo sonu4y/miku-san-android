@@ -94,6 +94,7 @@ var settings_layer: Control
 var screen_margin: MarginContainer
 var kb_lift := 0.0           # how far the UI is lifted for the on-screen keyboard
 var kb_override := -1.0      # for testing without a real keyboard
+const KEYBOARD_SHARE := 0.45 # typical phone keyboard (with suggestion bar) as a share of the screen
 
 
 func _ready() -> void:
@@ -256,6 +257,15 @@ func _process(delta: float) -> void:
 			b[0].set_blend_shape_value(b[1], minf(1.0, float(acc.get([b[0], b[1]], 0.0))))
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	# a tap on Miku (outside the chat UI) closes the keyboard
+	if (event is InputEventScreenTouch and event.pressed) or (event is InputEventMouseButton and event.pressed):
+		var owner := get_viewport().gui_get_focus_owner()
+		if owner is LineEdit or owner is TextEdit:
+			owner.release_focus()
+			DisplayServer.virtual_keyboard_hide()
+
+
 func _input(event: InputEvent) -> void:
 	if event is InputEventScreenDrag or event is InputEventMouseMotion:
 		var size := get_viewport().get_visible_rect().size
@@ -271,6 +281,15 @@ func follow_keyboard(delta: float) -> void:
 	var win_h := float(DisplayServer.window_get_size().y)
 	var to_ui := ui.size.y / win_h if win_h > 0.0 else 1.0
 	var target := kb_px * to_ui
+	# Many phones (Samsung, SwiftKey, full-screen apps) report 0 for the keyboard
+	# height. If a text box is focused, the keyboard is open: lift by a typical
+	# keyboard height instead.
+	var owner := get_viewport().gui_get_focus_owner()
+	var typing := owner is LineEdit or owner is TextEdit
+	if typing and target < ui.size.y * 0.2:
+		target = ui.size.y * KEYBOARD_SHARE
+	elif not typing and kb_override < 0.0:
+		target = 0.0 if target < ui.size.y * 0.2 else target
 	kb_lift = target if absf(target - kb_lift) < 1.0 else lerpf(kb_lift, target, minf(1.0, delta * 14.0))
 	screen_margin.add_theme_constant_override("margin_bottom", 18 + int(kb_lift))
 	if settings_layer:
@@ -747,12 +766,17 @@ func build_ui() -> void:
 	entry.add_theme_color_override("font_placeholder_color", Color(MIST, 0.75))
 	entry.add_theme_stylebox_override("normal", box(Color(0.10, 0.15, 0.20), 999, Vector4(16, 8, 16, 8)))
 	entry.add_theme_stylebox_override("focus", box(Color(0.12, 0.18, 0.24), 999, Vector4(16, 8, 16, 8)))
-	entry.text_submitted.connect(func(s): entry.clear(); send(s))
+	entry.text_submitted.connect(func(s): entry.clear(); _done_typing(); send(s))
 	row.add_child(entry)
-	row.add_child(make_button("Send", func(): var s := entry.text; entry.clear(); send(s), CANDLE, DARK_INK))
+	row.add_child(make_button("Send", func(): var s := entry.text; entry.clear(); _done_typing(); send(s), CANDLE, DARK_INK))
 	col.add_child(bar)
 	ui.resized.connect(_fit_bubbles)
 	_fit_bubbles()
+
+
+func _done_typing() -> void:
+	entry.release_focus()
+	DisplayServer.virtual_keyboard_hide()
 
 
 func _fit_bubbles() -> void:
