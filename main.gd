@@ -75,8 +75,21 @@ var rec_frames := PackedVector2Array()
 var in_phrase := false
 var silence := 0.0
 var phrase_len := 0.0
-var noise_floor := 0.01
+var noise_floor := 0.002
 var transcribing := false
+var preroll := PackedVector2Array()   # audio kept from just before you start talking
+
+# live mode (native Android service: works in other apps, can see the screen)
+var live = null                       # Engine.get_singleton("MikuLive") on Android
+var live_on := false
+var live_state := ""
+var live_level := 0.0
+var live_pending_start := false
+var sharing := false
+var screen_btn: Button
+var overlay_row: HBoxContainer
+var level_bar: Panel
+var seen_replies: Array = []          # avoids double-handling turns from the background
 
 # UI
 var ui: Control
@@ -104,6 +117,7 @@ func _ready() -> void:
 	setup_tts()
 	setup_http()
 	setup_mic()
+	setup_live()
 	if history.is_empty():
 		show_reply("Hey %s. I'm %s. Pull up a chair and tell me how your day's going." % [settings.user_name, settings.name])
 	else:
@@ -205,6 +219,9 @@ func _process(delta: float) -> void:
 	if mic_on:
 		listen(delta)
 	follow_keyboard(delta)
+	if level_bar and level_bar.visible:
+		var target_w := 8.0 + 110.0 * live_level
+		level_bar.custom_minimum_size.x = lerpf(level_bar.custom_minimum_size.x, target_w, minf(1.0, delta * 20.0))
 
 	var talking: bool = speaking or Time.get_ticks_msec() / 1000.0 < flap_until
 	var breathe := sin(t * 1.6)
@@ -277,7 +294,7 @@ func follow_keyboard(delta: float) -> void:
 	# Lift the chat bubbles and message bar above the on-screen keyboard.
 	if screen_margin == null:
 		return
-	var kb_px := kb_override if kb_override >= 0.0 else float(DisplayServer.virtual_keyboard_get_height())
+	var kb_px := kb_override if kb_override >= 0.0 else (float(DisplayServer.virtual_keyboard_get_height()) if OS.has_feature("mobile") else 0.0)
 	var win_h := float(DisplayServer.window_get_size().y)
 	var to_ui := ui.size.y / win_h if win_h > 0.0 else 1.0
 	var target := kb_px * to_ui
@@ -428,6 +445,8 @@ func send(text: String) -> void:
 		return
 	busy = true
 	stop_speaking()
+	if live_on:
+		live.stopSpeaking()
 	history.append({"role": "user", "content": text})
 	show_you(text)
 	show_reply("...")
@@ -453,13 +472,20 @@ func _on_reply(result: int, code: int, _headers: PackedStringArray, body: Packed
 	if raw.strip_edges() == "":
 		_fail("empty")
 		return
+	apply_reply(raw, true)
+	busy = false
+
+
+## Show her reply, update mood, memory and history. speak_it = use the app's own voice.
+func apply_reply(raw: String, speak_it: bool) -> void:
 	var c := clean_reply(raw)
 	show_reply(c.text if c.text != "" else "...")
 	if c.mood != "":
 		set_mood(c.mood, 0.75, 8)
-	var parts := RegEx.create_from_string("[^.!?…]+[.!?…]*").search_all(c.text)
-	for p in parts:
-		say(p.get_string())
+	if speak_it:
+		var parts := RegEx.create_from_string("[^.!?…]+[.!?…]*").search_all(c.text)
+		for p in parts:
+			say(p.get_string())
 	history.append({"role": "assistant", "content": raw})
 	for f in c.remember:
 		if not f in memories:
@@ -470,8 +496,9 @@ func _on_reply(result: int, code: int, _headers: PackedStringArray, body: Packed
 		history = history.slice(history.size() - 80)
 	if memories.size() > 60:
 		memories = memories.slice(memories.size() - 60)
-	busy = false
 	save_state()
+	if live_on:
+		live.updateContext(live_config())
 
 
 func _fail(code: String) -> void:
@@ -510,6 +537,7 @@ func clean_reply(raw: String) -> Dictionary:
 
 # --------------------------------------------------------------- listening --
 func setup_mic() -> void:
+	# Fallback listener for platforms without the native live service (e.g. desktop).
 	var bus := AudioServer.bus_count
 	AudioServer.add_bus(bus)
 	AudioServer.set_bus_name(bus, "Mic")
@@ -524,17 +552,18 @@ func setup_mic() -> void:
 
 
 func toggle_mic() -> void:
-	if OS.get_name() == "Android" and not "android.permission.RECORD_AUDIO" in OS.get_granted_permissions():
-		OS.request_permissions()
-		status_lbl.text = "Allow the microphone, then tap Mic again."
+	if live != null:
+		toggle_live()
 		return
 	mic_on = not mic_on
 	style_button(mic_btn, CANDLE if mic_on else GLASS, DARK_INK if mic_on else INK)
+	mic_btn.text = "End" if mic_on else "Live"
+	level_bar.visible = mic_on
 	if mic_on:
 		stop_speaking()
 		mic_player.play()
 		capture.clear_buffer()
-		status_lbl.text = "Listening..."
+		status_lbl.text = "Listening... just talk"
 	else:
 		mic_player.stop()
 		in_phrase = false
@@ -542,45 +571,63 @@ func toggle_mic() -> void:
 		status_lbl.text = ""
 
 
+var capture_override = null   # tests feed audio here instead of the microphone
+
+
 func listen(delta: float) -> void:
-	var n := capture.get_frames_available()
-	if n <= 0:
-		return
-	var frames := capture.get_buffer(n)
-	# pause while she talks or thinks, so she doesn't hear herself
+	var frames: PackedVector2Array
+	if capture_override != null:
+		frames = capture_override
+		capture_override = null
+	else:
+		var n := capture.get_frames_available()
+		if n <= 0:
+			return
+		frames = capture.get_buffer(n)
 	if busy or speaking or transcribing or not speak_queue.is_empty():
+		# she's thinking or talking: don't record her own voice
 		in_phrase = false
 		rec_frames.clear()
+		preroll.clear()
 		return
 	var sum := 0.0
 	for f in frames:
 		sum += f.x * f.x
 	var rms := sqrt(sum / maxf(1.0, frames.size()))
+	live_level = clampf((linear_to_db(rms + 1e-6) + 60.0) / 45.0, 0.0, 1.0)
 	if not in_phrase:
-		noise_floor = lerp(noise_floor, rms, 0.02)
-		if rms > maxf(0.02, noise_floor * 3.0):
+		# follow the room's background noise; start when you're clearly above it
+		noise_floor = lerpf(noise_floor, rms, 0.3 if rms < noise_floor else 0.005)
+		preroll.append_array(frames)
+		var keep := int(AudioServer.get_mix_rate() * 0.35)
+		if preroll.size() > keep:
+			preroll = preroll.slice(preroll.size() - keep)
+		if rms > maxf(0.004, noise_floor * 3.0):
 			in_phrase = true
 			silence = 0.0
 			phrase_len = 0.0
-			rec_frames = frames
-			status_lbl.text = "Listening..."
+			rec_frames = preroll.duplicate()
+			preroll.clear()
+			status_lbl.text = "Hearing you..."
 	else:
 		rec_frames.append_array(frames)
 		phrase_len += delta
-		silence = silence + delta if rms < maxf(0.015, noise_floor * 2.0) else 0.0
-		if silence > 0.9 or phrase_len > 15.0:
+		silence = silence + delta if rms < maxf(0.003, noise_floor * 2.0) else 0.0
+		if silence > 0.7 or phrase_len > 20.0:
 			in_phrase = false
-			if phrase_len > 0.5:
+			if phrase_len - silence > 0.25:
 				transcribe(rec_frames)
+			else:
+				status_lbl.text = "Listening... just talk"
 			rec_frames = PackedVector2Array()
 
 
-func transcribe(frames: PackedVector2Array) -> void:
-	# downsample to 16 kHz mono 16-bit WAV and ask the server to turn it into text
+func make_wav(frames: PackedVector2Array) -> PackedByteArray:
+	# 16 kHz mono 16-bit WAV
 	var src_rate := AudioServer.get_mix_rate()
 	var step := src_rate / 16000.0
-	var pcm := PackedByteArray()
 	var count := int(frames.size() / step)
+	var pcm := PackedByteArray()
 	pcm.resize(count * 2)
 	for i in count:
 		var v := clampf(frames[int(i * step)].x, -1.0, 1.0)
@@ -596,25 +643,191 @@ func transcribe(frames: PackedVector2Array) -> void:
 	wav.append_array("data".to_ascii_buffer())
 	var d := PackedByteArray(); d.resize(4); d.encode_u32(0, pcm.size()); wav.append_array(d)
 	wav.append_array(pcm)
+	return wav
+
+
+func transcribe(frames: PackedVector2Array) -> void:
+	# one round trip: your voice in, what she heard + her reply out
 	transcribing = true
-	status_lbl.text = "Got it..."
-	var body := JSON.stringify({"audio": Marshalls.raw_to_base64(wav)})
-	if hear_http.request(SERVER + "/api/hear", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body) != OK:
+	status_lbl.text = "Thinking..."
+	set_mood("neutral")
+	var body := JSON.stringify({"system": rules(), "messages": recent_messages(), "audio": Marshalls.raw_to_base64(make_wav(frames))})
+	var err := hear_http.request(SERVER + "/api/talk", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		push_warning("talk request failed: %s" % err)
 		transcribing = false
 
 
 func _on_heard(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	transcribing = false
-	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
-		status_lbl.text = "Didn't catch that."
-		return
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
-	var text: String = parsed.get("text", "") if parsed is Dictionary else ""
-	if text.strip_edges() == "":
-		status_lbl.text = "Didn't catch that."
+	if result != HTTPRequest.RESULT_SUCCESS or code != 200 or not parsed is Dictionary:
+		var err: String = parsed.get("error", "server") if parsed is Dictionary else "offline"
+		status_lbl.text = error_text(err)
 		return
-	status_lbl.text = "Listening..." if mic_on else ""
-	send(text)
+	var heard: String = str(parsed.get("heard", "")).strip_edges()
+	var reply: String = str(parsed.get("reply", "")).strip_edges()
+	status_lbl.text = "Listening... just talk" if mic_on else ""
+	if heard == "" or reply == "":
+		return
+	history.append({"role": "user", "content": heard})
+	show_you(heard)
+	apply_reply(reply, true)
+
+
+func recent_messages() -> Array:
+	var msgs: Array = history.slice(maxi(0, history.size() - 24))
+	while not msgs.is_empty() and msgs[0].role != "user":
+		msgs.pop_front()
+	return msgs
+
+
+func error_text(code: String) -> String:
+	return {
+		"slow_down": "Too many messages. Give me a minute.",
+		"daily_limit": "We've talked a lot today! Come back tomorrow.",
+		"too_long": "That was a bit long. Try saying it shorter.",
+		"ai_rate_limited": "My brain's busy right now. Try again in a minute.",
+		"offline": "I can't reach the internet right now.",
+		"mic_unavailable": "Couldn't open the microphone. Is another app using it?",
+	}.get(code, "Something went wrong. Keep talking and I'll try again.")
+
+
+# ------------------------------------------------------------- live mode --
+func setup_live() -> void:
+	if not Engine.has_singleton("MikuLive"):
+		return
+	live = Engine.get_singleton("MikuLive")
+	live.live_state.connect(_on_live_state)
+	live.live_level.connect(func(v): live_level = v)
+	live.live_heard.connect(_on_live_heard)
+	live.live_reply.connect(_on_live_reply)
+	live.live_speak_start.connect(_on_live_speak_start)
+	live.live_speak_progress.connect(func(pos): speak_idx = pos)
+	live.live_speak_done.connect(func(): speaking = false)
+	live.live_error.connect(func(code): status_lbl.text = error_text(code))
+	live.screen_share.connect(_on_screen_share)
+	live.permissions_done.connect(_on_permissions_done)
+	if live.isLive():
+		_set_live_ui(true)
+		live.updateContext(live_config())
+
+
+func live_config() -> String:
+	return JSON.stringify({"server": SERVER, "system": rules(), "messages": recent_messages(), "voice_on": settings.voice_on})
+
+
+func toggle_live() -> void:
+	if live_on:
+		live.stopLive()
+		_set_live_ui(false)
+		return
+	if not live.hasMicPermission():
+		live_pending_start = true
+		status_lbl.text = "Allow the microphone so she can hear you."
+		live.requestPermissions()
+		return
+	start_live()
+
+
+func start_live() -> void:
+	stop_speaking()
+	live.startLive(live_config())
+	_set_live_ui(true)
+
+
+func _on_permissions_done(granted: bool) -> void:
+	if live_pending_start and granted:
+		live_pending_start = false
+		start_live()
+	elif not granted:
+		live_pending_start = false
+		status_lbl.text = "She needs the microphone to hear you. You can allow it in Android settings."
+
+
+func _set_live_ui(on: bool) -> void:
+	live_on = on
+	mic_btn.text = "End" if on else "Live"
+	style_button(mic_btn, CANDLE if on else GLASS, DARK_INK if on else INK)
+	screen_btn.visible = on
+	level_bar.visible = on
+	if not on:
+		sharing = false
+		screen_btn.text = "Share screen"
+		status_lbl.text = ""
+		speaking = false
+		overlay_row.visible = false
+	else:
+		status_lbl.text = "Listening... just talk"
+		overlay_row.visible = not live.canDrawOverlays()
+
+
+func _on_live_state(st: String) -> void:
+	live_state = st
+	match st:
+		"listening": status_lbl.text = "Listening... just talk"
+		"hearing": status_lbl.text = "Hearing you..."
+		"thinking":
+			status_lbl.text = "Thinking..."
+			set_mood("neutral")
+		"speaking": status_lbl.text = "Talking. Speak anytime to interrupt."
+		"stopped": _set_live_ui(false)
+
+
+func _on_live_heard(text: String) -> void:
+	history.append({"role": "user", "content": text})
+	show_you(text)
+
+
+func _on_live_reply(raw: String) -> void:
+	if raw in seen_replies:
+		return
+	seen_replies.append(raw)
+	if seen_replies.size() > 30:
+		seen_replies.pop_front()
+	apply_reply(raw, false)
+
+
+func _on_live_speak_start(text: String) -> void:
+	speaking_text = text
+	speak_start = Time.get_ticks_msec() / 1000.0
+	speak_idx = 0
+	speaking = true
+
+
+func toggle_screen() -> void:
+	if sharing:
+		live.stopScreenShare()
+		_on_screen_share(false)
+	else:
+		status_lbl.text = "Choose \"Entire screen\" so she can see other apps."
+		live.requestScreenShare()
+
+
+func _on_screen_share(on: bool) -> void:
+	sharing = on
+	screen_btn.text = "Stop sharing" if on else "Share screen"
+	style_button(screen_btn, ME if on else GLASS, INK)
+	if on:
+		status_lbl.text = "She can see your screen now. Switch apps and just talk."
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_RESUMED and live != null:
+		# pick up anything you talked about while the app was in the background
+		var parsed = JSON.parse_string(live.takeBackgroundTurns())
+		if parsed is Array:
+			for t in parsed:
+				if t is Dictionary and not str(t.get("reply", "")) in seen_replies:
+					var reply := str(t.get("reply", ""))
+					seen_replies.append(reply)
+					history.append({"role": "user", "content": str(t.get("heard", ""))})
+					show_you(str(t.get("heard", "")))
+					apply_reply(reply, false)
+		if live_on and not live.isLive():
+			_set_live_ui(false)
+		elif live_on:
+			overlay_row.visible = not live.canDrawOverlays()
 
 
 # ---------------------------------------------------------------- storage --
@@ -746,6 +959,30 @@ func build_ui() -> void:
 	bubble.add_child(bubble_lbl)
 	col.add_child(bubble)
 
+	# overlay hint (Android only): lets her float over other apps
+	overlay_row = HBoxContainer.new()
+	overlay_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	overlay_row.visible = false
+	var tip := make_button("Keep Miku on top of other apps", func(): live.openOverlaySettings(), ME, INK)
+	tip.add_theme_font_size_override("font_size", 18)
+	overlay_row.add_child(tip)
+	col.add_child(overlay_row)
+
+	var live_row := HBoxContainer.new()
+	live_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	live_row.add_theme_constant_override("separation", 10)
+	screen_btn = make_button("Share screen", toggle_screen)
+	screen_btn.add_theme_font_size_override("font_size", 18)
+	screen_btn.visible = false
+	live_row.add_child(screen_btn)
+	level_bar = Panel.new()
+	level_bar.custom_minimum_size = Vector2(8, 10)
+	level_bar.add_theme_stylebox_override("panel", box(CANDLE, 999, Vector4.ZERO))
+	level_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	level_bar.visible = false
+	live_row.add_child(level_bar)
+	col.add_child(live_row)
+
 	status_lbl = label("", 17, MIST)
 	status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(status_lbl)
@@ -756,10 +993,10 @@ func build_ui() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 8)
 	bar.add_child(row)
-	mic_btn = make_button("Mic", toggle_mic)
+	mic_btn = make_button("Live", toggle_mic)
 	row.add_child(mic_btn)
 	entry = LineEdit.new()
-	entry.placeholder_text = "Type here, or tap Mic to talk"
+	entry.placeholder_text = "Type, or tap Live to talk"
 	entry.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	entry.add_theme_font_size_override("font_size", 21)
 	entry.add_theme_color_override("font_color", INK)

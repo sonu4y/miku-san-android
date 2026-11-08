@@ -22,6 +22,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.5"
+
+      - name: Build the live-mode plugin (native Android service)
+        run: |
+          cd android-plugin
+          gradle --no-daemon :miku-live:assembleRelease
+          cp miku-live/build/outputs/aar/miku-live-release.aar ../addons/miku-live.aar
+          ls -la ../addons/miku-live.aar
+
       - name: Download Godot and Android export templates
         run: |
           curl -sSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
@@ -77,6 +88,12 @@ jobs:
           "$BT/apksigner" verify --verbose build/miku-san.apk
           "$BT/aapt2" dump badging build/miku-san.apk | grep -E "package:|sdkVersion|targetSdkVersion|uses-permission|launchable-activity"
           "$BT/zipalign" -c -p 4 build/miku-san.apk && echo "zipalign OK"
+          echo "--- live mode wired in?"
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml build/miku-san.apk > manifest.txt
+          grep -q "org.godotengine.plugin.v2.MikuLive" manifest.txt && echo "MikuLive plugin registered"
+          grep -q "com.sonu4y.mikulive.LiveService" manifest.txt && echo "LiveService declared"
+          grep -q "FOREGROUND_SERVICE_MICROPHONE" manifest.txt && echo "background mic permission OK"
+          grep -q "SYSTEM_ALERT_WINDOW" manifest.txt && echo "floating bubble permission OK"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -86,7 +103,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v4-build-${{ github.run_number }}
-          name: Miku-san v4 APK (build ${{ github.run_number }})
-          body: Download miku-san.apk below and open it on your Android phone to install.
+          tag_name: v5-build-${{ github.run_number }}
+          name: Miku-san v5 APK (build ${{ github.run_number }})
+          body: "Live mode: talk hands-free like Gemini Live, keeps going in other apps (floating bubble), and can see your screen. Download miku-san.apk below and open it on your phone to install."
           files: build/miku-san.apk

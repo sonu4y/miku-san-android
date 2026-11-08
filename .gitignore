@@ -3,3 +3,6 @@ build/
 *.tmp
 android/build/
 android/.build_version
+android-plugin/.gradle/
+android-plugin/**/build/
+addons/miku-live.aar
