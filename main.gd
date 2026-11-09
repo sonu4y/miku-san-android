@@ -53,8 +53,7 @@ var mouth := {"aa": 0.0, "ih": 0.0, "ou": 0.0, "ee": 0.0, "oh": 0.0}
 var look := Vector2.ZERO
 
 # speech
-var tts_voice := ""
-var speak_queue: Array = []
+var speak_queue: Array = []   # unused (kept so older checks stay valid)
 var speaking_text := ""
 var speak_start := 0.0
 var speak_idx := 0
@@ -91,7 +90,7 @@ var sharing := false
 var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
-const VOICES := [["Leda", "Leda: youthful"], ["Aoede", "Aoede: breezy"], ["Zephyr", "Zephyr: bright"], ["Laomedeia", "Laomedeia: upbeat"], ["Despina", "Despina: smooth"], ["Kore", "Kore: firm"], ["phone", "Phone's own voice"]]
+const VOICES := [["Leda", "Leda: youthful"], ["Aoede", "Aoede: breezy"], ["Zephyr", "Zephyr: bright"], ["Laomedeia", "Laomedeia: upbeat"], ["Despina", "Despina: smooth"], ["Kore", "Kore: firm"]]
 var voice_player: AudioStreamPlayer
 var speak_http: HTTPRequest
 var speak_cps := CHARS_PER_SEC        # how fast the current speech moves through the text (for lip-sync)
@@ -125,7 +124,6 @@ func _ready() -> void:
 	load_state()
 	build_world()
 	build_ui()
-	setup_tts()
 	setup_http()
 	setup_mic()
 	setup_live()
@@ -226,7 +224,6 @@ func add_expr(acc: Dictionary, name: String, w: float) -> void:
 func _process(delta: float) -> void:
 	delta = minf(delta, 0.05)
 	t += delta
-	pump_speech()
 	if mic_on:
 		listen(delta)
 	follow_keyboard(delta)
@@ -344,51 +341,14 @@ func set_mood(m: String, strength := 0.75, hold := 6.0) -> void:
 
 
 # ---------------------------------------------------------------- speech --
-func setup_tts() -> void:
-	var voices := DisplayServer.tts_get_voices_for_language("en")
-	var all := DisplayServer.tts_get_voices()
-	# prefer Google's online (network) voices: they sound much more natural
-	for v in all:
-		var id := str(v.get("id", "")).to_lower()
-		if "network" in id and str(v.get("language", "")).to_lower().begins_with("en-in"):
-			tts_voice = v.id
-			break
-	if tts_voice == "":
-		for v in all:
-			if "network" in str(v.get("id", "")).to_lower() and str(v.get("language", "")).to_lower().begins_with("en"):
-				tts_voice = v.id
-				break
-	for pat in (["en-in", "neerja", "aria", "jenny", "zira", "female", "en-gb", "en-us"] if tts_voice == "" else []):
-		for v in all:
-			if pat in str(v.get("name", "")).to_lower() or pat in str(v.get("language", "")).to_lower():
-				tts_voice = v.id
-				break
-		if tts_voice != "":
-			break
-	if tts_voice == "" and voices.size() > 0:
-		tts_voice = voices[0]
-	DisplayServer.tts_set_utterance_callback(DisplayServer.TTS_UTTERANCE_STARTED, func(_id): _on_tts_started())
-	DisplayServer.tts_set_utterance_callback(DisplayServer.TTS_UTTERANCE_ENDED, func(_id): _on_tts_ended())
-	DisplayServer.tts_set_utterance_callback(DisplayServer.TTS_UTTERANCE_CANCELED, func(_id): _on_tts_ended())
-	DisplayServer.tts_set_utterance_callback(DisplayServer.TTS_UTTERANCE_BOUNDARY, func(pos, _id): speak_idx = pos)
-
-
-func _on_tts_started() -> void:
-	speak_start = Time.get_ticks_msec() / 1000.0
-	speak_idx = 0
-	speaking = true
-
-
-func _on_tts_ended() -> void:
-	speaking = false
-
-
-## Speak a whole reply: her natural voice from the server, or the phone's voice as a fallback.
+## Speak a whole reply with her natural voice from the server. There is no
+## phone-voice fallback: if her voice can't be made, the reply shows as text
+## and her mouth moves silently.
 func speak_reply(text: String) -> void:
 	if text.strip_edges() == "":
 		return
-	if not settings.voice_on or settings.get("voice", "Leda") == "phone":
-		_say_with_phone(text)
+	if not settings.voice_on:
+		_silent_reply(text)
 		return
 	stream_voice(text)
 
@@ -396,7 +356,7 @@ func speak_reply(text: String) -> void:
 # --------------------------------------------- streamed natural voice --
 # Her voice is downloaded as raw audio and played while it arrives, so she
 # starts talking about a second after the reply instead of waiting for all of it.
-const VOICE_FIRST_AUDIO_TIMEOUT := 4.5
+const VOICE_FIRST_AUDIO_TIMEOUT := 15.0
 var vs_client: HTTPClient
 var vs_text := ""
 var vs_body := ""
@@ -428,8 +388,8 @@ func stream_voice(text: String) -> void:
 	vs_client.read_chunk_size = 8192
 	var err := vs_client.connect_to_host(host, port, TLSOptions.client() if tls else null)
 	if err != OK:
-		voice_status = "phone voice (couldn't connect)"
-		_say_with_phone(text)
+		voice_status = "no voice (couldn't connect)"
+		_silent_reply(text)
 		return
 	vs_text = text
 	vs_body = JSON.stringify({"text": text, "voice": settings.voice, "stream": true})
@@ -459,8 +419,10 @@ func _voice_fail(why: String) -> void:
 	var had_audio := vs_playback != null
 	stop_voice_stream()
 	if not had_audio:
-		voice_status = "phone voice (" + why + ")"
-		_say_with_phone(text)
+		voice_status = "no voice (" + why + ")"
+		if not why.contains("limit"):
+			status_lbl.text = "Her voice isn't available right now, so her reply is text only."
+		_silent_reply(text)
 
 
 func poll_voice_stream() -> void:
@@ -481,7 +443,7 @@ func poll_voice_stream() -> void:
 				vs_reading_done = true   # the whole response has been read
 		HTTPClient.STATUS_BODY:
 			if vs_client.get_response_code() == 429:
-				status_lbl.text = "Her natural voice is out of free uses for now, so she's using the phone voice."
+				status_lbl.text = "Her voice is out of free uses for now, so her replies are text only."
 				_voice_fail("natural voice free limit reached")
 				return
 			if vs_client.get_response_code() != 200:
@@ -574,8 +536,8 @@ func _on_speech(result: int, code: int, _headers: PackedStringArray, body: Packe
 		play_voice(Marshalls.base64_to_raw(parsed.audio), int(parsed.get("rate", 24000)), text)
 		voice_status = "natural (" + str(parsed.get("voice", settings.voice)) + ")"
 	else:
-		voice_status = "phone voice (natural voice unavailable: HTTP %d)" % code
-		_say_with_phone(text)
+		voice_status = "no voice (HTTP %d)" % code
+		_silent_reply(text)
 
 
 ## Play 16-bit mono PCM from the server and move her mouth along with it.
@@ -599,41 +561,17 @@ func play_voice(pcm: PackedByteArray, rate: int, text: String) -> void:
 	voice_player.play()
 
 
-func _say_with_phone(text: String) -> void:
+## No voice: her mouth moves silently for about as long as the reply would take to say.
+func _silent_reply(text: String) -> void:
 	speak_cps = CHARS_PER_SEC
-	for p in RegEx.create_from_string("[^.!?…]+[.!?…]*").search_all(text):
-		say(p.get_string())
-
-
-func say(sentence: String) -> void:
-	sentence = sentence.strip_edges()
-	if sentence == "":
-		return
-	if settings.voice_on and tts_voice != "":
-		speak_queue.append(sentence)
-	else:
-		var now := Time.get_ticks_msec() / 1000.0
-		if now > flap_until:
-			flap_text = sentence
-			flap_start = now
-		else:
-			flap_text += " " + sentence
-		flap_until = flap_start + flap_text.length() / CHARS_PER_SEC
-
-
-func pump_speech() -> void:
-	if speaking or speak_queue.is_empty():
-		return
-	speaking_text = speak_queue.pop_front()
-	speaking = true
-	speak_start = Time.get_ticks_msec() / 1000.0
-	speak_idx = 0
-	DisplayServer.tts_speak(speaking_text, tts_voice, 80, 1.08, 1.0)
+	flap_text = text
+	flap_start = Time.get_ticks_msec() / 1000.0
+	flap_until = flap_start + text.length() / CHARS_PER_SEC
 
 
 func stop_speaking() -> void:
 	speak_queue.clear()
-	DisplayServer.tts_stop()
+	flap_until = 0.0
 	pending_speech = ""
 	if voice_player:
 		voice_player.stop()
@@ -963,7 +901,8 @@ func error_text(code: String) -> String:
 		"offline": "I can't reach the internet right now.",
 		"mic_unavailable": "Couldn't open the microphone. Is another app using it?",
 		"server_old": "The Miku server needs updating (redeploy v4 on Vercel).",
-		"voice_limit": "Her natural voice is out of free uses for now, so she's using the phone voice.",
+		"voice_limit": "Her voice is out of free uses for now, so her replies are text only.",
+		"voice_unavailable": "Her voice isn't available right now, so her reply is text only.",
 	}.get(code, "Something went wrong. Keep talking and I'll try again.")
 
 
@@ -1095,7 +1034,7 @@ func diagnostics() -> String:
 	lines.append("Live: " + ("on, " + (live_state if live_state != "" else "starting") if on else "off"))
 	var bars := int(round(live_level * 10.0))
 	lines.append("Mic level: " + "|".repeat(bars) + ".".repeat(10 - bars) + ("  (talk to test)" if on else "  (start Live to test)"))
-	lines.append("Voice: " + ("off" if not settings.voice_on else ("phone voice" if settings.voice == "phone" else settings.voice + ", last: " + voice_status)))
+	lines.append("Voice: " + ("off" if not settings.voice_on else settings.voice + ", last: " + voice_status))
 	lines.append("Last problem: " + last_problem)
 	if live != null:
 		var lg: String = live.getLog()
@@ -1164,6 +1103,16 @@ func _notification(what: int) -> void:
 
 
 # ---------------------------------------------------------------- storage --
+func _fix_old_voice() -> void:
+	# the phone voice was removed; anyone who picked it gets Leda
+	var known := false
+	for v in VOICES:
+		if v[0] == settings.get("voice", ""):
+			known = true
+	if not known:
+		settings.voice = "Leda"
+
+
 func load_state() -> void:
 	if not FileAccess.file_exists(STATE_PATH):
 		return
@@ -1177,6 +1126,7 @@ func load_state() -> void:
 		for m in parsed.get("memories", []):
 			if m is String:
 				memories.append(m)
+	_fix_old_voice()
 
 
 func save_state() -> void:
@@ -1498,7 +1448,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v9 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v10 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:

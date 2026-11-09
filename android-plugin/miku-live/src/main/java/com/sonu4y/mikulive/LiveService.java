@@ -21,8 +21,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.speech.tts.TextToSpeech;
-import android.speech.tts.UtteranceProgressListener;
 import android.util.Base64;
 import android.util.Log;
 
@@ -100,8 +98,6 @@ public class LiveService extends Service {
     private volatile boolean bargeIn = true;
     private volatile AudioTrack track;
 
-    private TextToSpeech tts;
-    private volatile boolean ttsReady = false;
 
     private Bubble bubble;
     private ScreenGrabber screen;
@@ -114,28 +110,6 @@ public class LiveService extends Service {
         instance = this;
         bubble = new Bubble(this);
         screen = new ScreenGrabber(this);
-        tts = new TextToSpeech(this, status -> {
-            if (status != TextToSpeech.SUCCESS) return;
-            Locale in = new Locale("en", "IN");
-            int r = tts.setLanguage(in);
-            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts.setLanguage(Locale.US);
-            pickBestPhoneVoice();
-            tts.setPitch(1.12f);
-            tts.setSpeechRate(1.02f);
-            tts.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build());
-            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                @Override public void onStart(String id) { }
-                @Override public void onDone(String id) { finishedSpeaking(); }
-                @Override public void onError(String id) { finishedSpeaking(); }
-                @Override public void onStop(String id, boolean interrupted) { finishedSpeaking(); }
-                @Override public void onRangeStart(String id, int start, int end, int frame) {
-                    MikuLivePlugin.emit("live_speak_progress", start);
-                }
-            });
-            ttsReady = true;
-        });
     }
 
     @Override
@@ -177,33 +151,9 @@ public class LiveService extends Service {
     @Override
     public void onDestroy() {
         stopEverything();
-        if (tts != null) tts.shutdown();
         net.shutdownNow();
         instance = null;
         super.onDestroy();
-    }
-
-    /** Picks the most natural English voice installed on the phone (used when the natural voice isn't available). */
-    private void pickBestPhoneVoice() {
-        try {
-            android.speech.tts.Voice best = null;
-            int bestScore = -1;
-            for (android.speech.tts.Voice v : tts.getVoices()) {
-                Locale l = v.getLocale();
-                if (l == null || !"en".equals(l.getLanguage())) continue;
-                if (v.getFeatures() != null && v.getFeatures().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)) continue;
-                int score = v.getQuality();
-                if ("IN".equals(l.getCountry())) score += 60;
-                else if ("US".equals(l.getCountry()) || "GB".equals(l.getCountry())) score += 30;
-                if (v.isNetworkConnectionRequired()) score += 20;   // Google's online voices sound better
-                if (score > bestScore) { bestScore = score; best = v; }
-            }
-            if (best != null) {
-                tts.setVoice(best);
-                log("Phone voice: " + best.getName());
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     boolean isRunning() { return running; }
@@ -256,7 +206,6 @@ public class LiveService extends Service {
         running = false;
         stopTrack();
         if (audioThread != null) audioThread.interrupt();
-        if (tts != null) tts.stop();
         if (screen != null) screen.stop();
         main.post(() -> bubble.hide());
         setState(State.LISTENING);
@@ -540,10 +489,10 @@ public class LiveService extends Service {
                 MikuLivePlugin.emit("live_reply", reply);
             }
             String say = spokenText(reply);
-            if (voiceOn && !"phone".equals(voiceName) && !say.isEmpty()) {
+            if (voiceOn && !say.isEmpty()) {
                 streamVoice(say);
             } else {
-                speak(say);
+                silentReply(say);
             }
         } catch (Exception e) {
             Log.w(TAG, "turn failed", e);
@@ -577,18 +526,11 @@ public class LiveService extends Service {
     }
 
     // ---------------------------------------------------------------- speaking --
-    private void speak(String text) {
-        if (text.isEmpty() || !voiceOn || !ttsReady) {
-            MikuLivePlugin.emit("live_speak_start", text);
-            // no voice: give the app time to animate her mouth, then listen again
-            main.postDelayed(this::finishedSpeaking, Math.min(8000, 300 + text.length() * 70L));
-            setState(State.SPEAKING);
-            return;
-        }
+    /** No voice (voice off, or her natural voice unavailable): the reply shows as text and her mouth moves silently. */
+    private void silentReply(String text) {
         setState(State.SPEAKING);
         MikuLivePlugin.emit("live_speak_start", text);
-        Bundle p = new Bundle();
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, p, "miku-" + System.currentTimeMillis());
+        main.postDelayed(this::finishedSpeaking, Math.min(8000, 300 + text.length() * 70L));
     }
 
     private volatile boolean streamCancel = false;
@@ -596,7 +538,7 @@ public class LiveService extends Service {
 
     /**
      * Streams her natural voice from the server and plays it while it downloads.
-     * If no audio arrives within a few seconds, uses the phone's voice instead.
+     * If her voice can't be made (e.g. the free limit is used up), the reply shows as text only.
      */
     private void streamVoice(String text) {
         streamCancel = false;
@@ -610,7 +552,7 @@ public class LiveService extends Service {
             streamConn = c;
             c.setRequestMethod("POST");
             c.setConnectTimeout(8000);
-            c.setReadTimeout(5000);          // no audio within 5 s: give up and use the phone voice
+            c.setReadTimeout(15000);         // give her voice up to 15 s to start
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "application/json");
             c.setRequestProperty("Origin", server);
@@ -671,9 +613,10 @@ public class LiveService extends Service {
             }
         } catch (Exception e) {
             if (!started && !streamCancel && running) {
-                log("Natural voice " + (e instanceof java.net.SocketTimeoutException ? "too slow" : "failed (" + e.getMessage() + ")") + ", using phone voice");
+                log("Voice " + (e instanceof java.net.SocketTimeoutException ? "took too long" : "unavailable (" + e.getMessage() + ")") + ", showing text only");
+                if (!(e.getMessage() != null && e.getMessage().contains("limit"))) MikuLivePlugin.emit("live_error", "voice_unavailable");
                 if (t != null) t.release();
-                speak(text);
+                silentReply(text);
                 return;
             }
             if (started) finishedSpeaking();
@@ -712,7 +655,7 @@ public class LiveService extends Service {
     /** Plays her natural (server-made) voice and reports progress for lip-sync. */
     private void playPcm(byte[] pcm, int rate, String text) {
         stopTrack();
-        if (pcm.length < 4) { speak(text); return; }
+        if (pcm.length < 4) { silentReply(text); return; }
         int len = pcm.length & ~1;
         AudioTrack t;
         try {
@@ -729,8 +672,8 @@ public class LiveService extends Service {
                     .build();
             t.write(pcm, 0, len);
         } catch (Exception e) {
-            log("Couldn't play natural voice: " + e.getMessage());
-            speak(text);
+            log("Couldn't play her voice: " + e.getMessage());
+            silentReply(text);
             return;
         }
         final int frames = len / 2;
@@ -764,7 +707,6 @@ public class LiveService extends Service {
         streamCancel = true;
         HttpURLConnection sc = streamConn;
         if (sc != null) { try { sc.disconnect(); } catch (Exception ignored) { } }
-        if (tts != null) tts.stop();
         stopTrack();
         log("Interrupted by you");
         finishedSpeaking();

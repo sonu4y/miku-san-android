@@ -103,7 +103,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v9-build-${{ github.run_number }}
+          tag_name: v10-build-${{ github.run_number }}
           name: Miku-san v9 APK (build ${{ github.run_number }})
           body: "Live mode: talk hands-free like Gemini Live, keeps going in other apps (floating bubble), and can see your screen. Download miku-san.apk below and open it on your phone to install."
           files: build/miku-san.apk
