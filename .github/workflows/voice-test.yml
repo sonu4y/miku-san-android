@@ -109,7 +109,7 @@ jobs:
 
       - name: Free disk space for the emulator
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
           rm -rf android/build/build "$HOME/.local/share/godot/export_templates" || true
           df -h /
 
