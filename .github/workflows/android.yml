@@ -144,5 +144,5 @@ jobs:
         with:
           tag_name: v12-build-${{ github.run_number }}
           name: Miku-san v12 APK (build ${{ github.run_number }})
-          body: "Her cute on-phone voice, fixed for Live mode and the voice preview. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
+          body: "New instant on-phone voices (Miku, Sunny), HD voices kept, Live mode and voice preview fixed. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
           files: build/miku-san.apk

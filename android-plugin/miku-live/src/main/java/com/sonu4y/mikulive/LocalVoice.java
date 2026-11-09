@@ -174,7 +174,7 @@ final class LocalVoice {
         if (done.exists()) return root;
         AssetManager am = ctx.getAssets();
         long free = ctx.getFilesDir().getUsableSpace();
-        if (free < 250L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free)");
+        if (free < 200L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free)");
         for (String old : new String[]{"kokoro-v1"}) {
             File o = new File(ctx.getFilesDir(), old);
             if (o.exists()) deleteAll(o);
