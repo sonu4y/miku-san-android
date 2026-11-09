@@ -538,6 +538,18 @@ public class LiveService extends Service {
 
     private volatile boolean streamCancel = false;
 
+    /** For automatic tests: speak as if this were her reply to a turn. */
+    void testSay(String text) {
+        net.execute(() -> {
+            setState(State.THINKING);
+            log("Test reply: " + text);
+            LocalVoice.Style st = LocalVoice.style(voiceName);
+            if (!voiceOn) silentReply(text);
+            else if (st != null && LocalVoice.failure() == null) speakLocal(text, st);
+            else streamVoice(text);
+        });
+    }
+
     /** Her on-device voice: made sentence by sentence on the phone and played as each piece is ready. */
     private void speakLocal(String text, LocalVoice.Style st) {
         streamCancel = false;

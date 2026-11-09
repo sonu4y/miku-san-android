@@ -13,6 +13,8 @@ env:
 
 jobs:
   apk:
+    # a phone release is made on manual runs or when the commit message says [release]
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +130,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v11-build-${{ github.run_number }}
-          name: Miku-san v11 APK (build ${{ github.run_number }})
-          body: "Her own cute voice now runs on your phone: offline, fast, no limits. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
+          tag_name: v12-build-${{ github.run_number }}
+          name: Miku-san v12 APK (build ${{ github.run_number }})
+          body: "Her cute on-phone voice, fixed for Live mode and the voice preview. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
           files: build/miku-san.apk

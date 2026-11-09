@@ -373,7 +373,9 @@ func local_voice(text: String) -> void:
 	vs_pushed = 0
 	vs_active = true
 	vs_started_at = Time.get_ticks_msec() / 1000.0
-	vs_deadline = vs_started_at + 25.0      # the very first time, the voice model also has to load
+	vs_deadline = vs_started_at + 20.0
+	if str(live.voiceStatus()) == "loading":
+		status_lbl.text = "Her voice is waking up, one moment..."
 	if not live.speakLocal(local_id, text, settings.voice):
 		vs_local = false
 		stream_voice(text)
@@ -487,6 +489,9 @@ func _voice_fail(why: String) -> void:
 
 func poll_voice_stream() -> void:
 	if vs_active and vs_local:
+		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline and str(live.voiceStatus()) == "loading":
+			vs_deadline += 5.0      # still unpacking/loading her voice (only slow the first time)
+			status_lbl.text = "Her voice is waking up, one moment..."
 		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline:
 			var text := vs_text
 			stop_voice_stream()
@@ -998,12 +1003,53 @@ func setup_live(singleton: Object = null) -> void:
 	live.connect("local_done", _on_local_done)
 	live.connect("local_failed", _on_local_failed)
 	live.prepareVoice()
+	if live.has_method("getLaunchExtra") and str(live.getLaunchExtra()) != "":
+		_selftest(str(live.getLaunchExtra()))
 	var crash: String = live.takeLastCrash()
 	if crash != "":
 		last_problem = "the app crashed last time: " + crash.get_slice("\n", 0).left(220)
 	if live.isLive():
 		_set_live_ui(true)
 		live.updateContext(live_config())
+
+
+## Automatic test on an emulator (started with the extra miku_selftest). Prints to the log.
+func _selftest(kind: String) -> void:
+	print("SELFTEST start ", kind)
+	settings.voice = "Miku"
+	settings.voice_on = true
+	for i in 60:
+		await get_tree().create_timer(1.0).timeout
+		if str(live.voiceStatus()) != "loading":
+			break
+	print("SELFTEST voice status: ", live.voiceStatus())
+	for n in 3:
+		speak_reply("Hi Vansh! This is how I sound. Do you like my voice?")
+		var t0 := Time.get_ticks_msec()
+		var heard := false
+		while Time.get_ticks_msec() - t0 < 30000:
+			await get_tree().create_timer(0.25).timeout
+			if speaking and vs_local and vs_playback != null:
+				heard = true
+			if heard and not vs_active:
+				break
+		print("SELFTEST preview %d: played=%s status=%s problem=%s" % [n, heard, voice_status, last_problem])
+		# a second preview tapped while the first is still talking
+		if n == 1:
+			speak_reply("First one, interrupted soon.")
+			await get_tree().create_timer(0.8).timeout
+			stop_speaking()
+			speak_reply("Second one plays instead.")
+			await get_tree().create_timer(8.0).timeout
+			print("SELFTEST double-tap: status=%s speaking=%s" % [voice_status, speaking])
+	if kind == "live":
+		toggle_live()
+		await get_tree().create_timer(4.0).timeout
+		print("SELFTEST live on: ", live_on, " state: ", live_state)
+		live.liveTestSay("Yay, live mode works! I can talk to you hands free now.")
+		await get_tree().create_timer(15.0).timeout
+	print("SELFTEST log:\n", live.getLog())
+	print("SELFTEST done")
 
 
 func _on_live_error(code: String) -> void:
@@ -1528,7 +1574,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v11 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v12 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:

@@ -71,14 +71,15 @@ final class LocalVoice {
             if (failure != null) throw new Exception(failure);
             long t0 = System.currentTimeMillis();
             try {
-                AssetManager am = ctx.getAssets();
-                File data = copyEspeak(ctx, am);
+                // the model is unpacked from the APK to app storage once; after that it loads straight from files
+                File dir = unpack(ctx);
+                long t1 = System.currentTimeMillis();
                 OfflineTtsKokoroModelConfig k = new OfflineTtsKokoroModelConfig();
-                k.setModel(DIR + "/model.int8.onnx");
-                k.setVoices(DIR + "/voices.bin");
-                k.setTokens(DIR + "/tokens.txt");
-                k.setLexicon(DIR + "/lexicon-us-en.txt");
-                k.setDataDir(data.getAbsolutePath());
+                k.setModel(new File(dir, "model.int8.onnx").getAbsolutePath());
+                k.setVoices(new File(dir, "voices.bin").getAbsolutePath());
+                k.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
+                k.setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath());
+                k.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
                 k.setLang("en-us");
                 k.setLengthScale(1.0f);
                 OfflineTtsModelConfig m = new OfflineTtsModelConfig();
@@ -91,15 +92,15 @@ final class LocalVoice {
                 c.setModel(m);
                 c.setMaxNumSentences(1);
                 c.setSilenceScale(0.2f);
-                OfflineTts t = new OfflineTts(am, c);
-                LiveService.log("On-device voice loaded in " + (System.currentTimeMillis() - t0) + " ms (" + m.getNumThreads() + " threads)");
-                long w = System.currentTimeMillis();
+                OfflineTts t = new OfflineTts(null, c);
+                long t2 = System.currentTimeMillis();
                 t.generate("Hi.", 40, 1.0f);   // warm up so the first real reply is quick
-                LiveService.log("On-device voice warmed up in " + (System.currentTimeMillis() - w) + " ms");
+                LiveService.log("On-phone voice ready: unpack " + (t1 - t0) + " ms, load " + (t2 - t1) + " ms, warm-up "
+                        + (System.currentTimeMillis() - t2) + " ms, " + m.getNumThreads() + " threads of " + cores);
                 tts = t;
                 return t;
             } catch (Throwable e) {
-                failure = "on-device voice failed to load: " + e;
+                failure = "on-phone voice failed to load: " + e;
                 LiveService.log(failure);
                 throw new Exception(failure);
             } finally {
@@ -108,26 +109,46 @@ final class LocalVoice {
         }
     }
 
-    private static File copyEspeak(Context ctx, AssetManager am) throws Exception {
-        File root = new File(ctx.getFilesDir(), "kokoro-v1");
-        File dir = new File(root, "espeak-ng-data");
+    private static final String[] FILES = {"model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt"};
+
+    private static File unpack(Context ctx) throws Exception {
+        File root = new File(ctx.getFilesDir(), "kokoro-v2");
         File done = new File(root, ".done");
-        if (done.exists()) return dir;
-        copyAssetDir(am, DIR + "/espeak-ng-data", dir);
+        if (done.exists()) return root;
+        AssetManager am = ctx.getAssets();
+        long free = ctx.getFilesDir().getUsableSpace();
+        if (free < 200L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free, needs 160 MB)");
+        // remove older copies
+        File old = new File(ctx.getFilesDir(), "kokoro-v1");
+        if (old.exists()) deleteAll(old);
+        root.mkdirs();
+        for (String f : FILES) copyAsset(am, DIR + "/" + f, new File(root, f));
+        copyAssetDir(am, DIR + "/espeak-ng-data", new File(root, "espeak-ng-data"));
         new FileOutputStream(done).close();
-        return dir;
+        return root;
+    }
+
+    private static void deleteAll(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) deleteAll(k);
+        f.delete();
+    }
+
+    private static void copyAsset(AssetManager am, String path, File out) throws Exception {
+        out.getParentFile().mkdirs();
+        File tmp = new File(out.getPath() + ".part");
+        try (InputStream in = am.open(path); OutputStream o = new FileOutputStream(tmp)) {
+            byte[] b = new byte[65536];
+            int n;
+            while ((n = in.read(b)) > 0) o.write(b, 0, n);
+        }
+        if (!tmp.renameTo(out)) throw new Exception("couldn't save " + out.getName());
     }
 
     private static void copyAssetDir(AssetManager am, String path, File out) throws Exception {
         String[] kids = am.list(path);
         if (kids == null || kids.length == 0) {
-            // a file
-            out.getParentFile().mkdirs();
-            try (InputStream in = am.open(path); OutputStream o = new FileOutputStream(out)) {
-                byte[] b = new byte[16384];
-                int n;
-                while ((n = in.read(b)) > 0) o.write(b, 0, n);
-            }
+            copyAsset(am, path, out);
             return;
         }
         out.mkdirs();
@@ -187,8 +208,11 @@ final class LocalVoice {
         float speed = 1.0f / st.pitch;   // played back faster/higher, so speak slower to keep a normal pace
         for (String piece : chunks(text)) {
             GeneratedAudio a;
+            long g0 = System.currentTimeMillis();
             synchronized (lock) { a = t.generate(piece, st.sid, speed); }
             float[] f = a.getSamples();
+            LiveService.log(String.format(java.util.Locale.US, "Voice piece: %d chars -> %.1f s of audio in %d ms",
+                    piece.length(), f.length / (float) MODEL_RATE, System.currentTimeMillis() - g0));
             byte[] b = new byte[f.length * 2];
             for (int i = 0; i < f.length; i++) {
                 int x = Math.round(Math.max(-1f, Math.min(1f, f[i])) * 32767f);

@@ -82,7 +82,7 @@ public class MikuLivePlugin extends GodotPlugin {
     }
 
     // ----------------------------------------------------- on-device voice --
-    private static volatile int localCancel = -1;
+    private static volatile int localWant = -1;   // the on-phone speech that should be playing
     private final java.util.concurrent.ExecutorService voiceThread = java.util.concurrent.Executors.newSingleThreadExecutor();
 
     /** Starts loading her on-device voice so the first reply is quick. */
@@ -106,12 +106,13 @@ public class MikuLivePlugin extends GodotPlugin {
         final LocalVoice.Style st = LocalVoice.style(voice);
         final Context c = ctx();
         if (st == null || c == null || LocalVoice.failure() != null) return false;
-        localCancel = -1;
+        localWant = id;
         voiceThread.execute(() -> {
             final boolean[] started = {false};
+            if (localWant != id) return;   // replaced by a newer one before it started
             try {
                 LocalVoice.speak(c, text, st, pcm -> {
-                    if (localCancel == id) return false;
+                    if (localWant != id) return false;
                     if (!started[0]) {
                         started[0] = true;
                         emit("local_start", id, LocalVoice.playbackRate(st));
@@ -129,7 +130,23 @@ public class MikuLivePlugin extends GodotPlugin {
 
     @UsedByGodot
     public void stopLocal(int id) {
-        localCancel = id;
+        if (localWant == id) localWant = -1;
+    }
+
+    /** For automatic tests: the "miku_selftest" value the app was started with, or "". */
+    @UsedByGodot
+    public String getLaunchExtra() {
+        Activity a = getActivity();
+        if (a == null || a.getIntent() == null) return "";
+        String v = a.getIntent().getStringExtra("miku_selftest");
+        return v == null ? "" : v;
+    }
+
+    /** For automatic tests: makes Live mode say something as if it were her reply. */
+    @UsedByGodot
+    public void liveTestSay(String text) {
+        LiveService s = LiveService.instance;
+        if (s != null) s.testSay(text);
     }
 
     @UsedByGodot
