@@ -80,7 +80,8 @@ public class LiveService extends Service {
     static final int END_SILENCE_FRAMES = 35;    // 700 ms of quiet ends the turn
     static final int MIN_VOICED_FRAMES = 12;     // ignore blips shorter than ~240 ms
     static final int MAX_FRAMES = 1000;          // 20 s max per turn
-    static final int BARGE_FRAMES = 8;           // 160 ms of loud speech interrupts her
+    static final int BARGE_FRAMES = 25;          // ~0.5 s of clearly louder speech interrupts her
+    static final int BARGE_GRACE_FRAMES = 40;    // ignore the first 0.8 s of her talking
 
     enum State { LISTENING, HEARING, THINKING, SPEAKING }
 
@@ -96,6 +97,7 @@ public class LiveService extends Service {
     private final JSONArray history = new JSONArray();
     private volatile boolean voiceOn = true;
     private volatile String voiceName = "Leda";
+    private volatile boolean bargeIn = true;
     private volatile AudioTrack track;
 
     private TextToSpeech tts;
@@ -117,10 +119,11 @@ public class LiveService extends Service {
             Locale in = new Locale("en", "IN");
             int r = tts.setLanguage(in);
             if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts.setLanguage(Locale.US);
+            pickBestPhoneVoice();
             tts.setPitch(1.12f);
             tts.setSpeechRate(1.02f);
             tts.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build());
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override public void onStart(String id) { }
@@ -180,6 +183,29 @@ public class LiveService extends Service {
         super.onDestroy();
     }
 
+    /** Picks the most natural English voice installed on the phone (used when the natural voice isn't available). */
+    private void pickBestPhoneVoice() {
+        try {
+            android.speech.tts.Voice best = null;
+            int bestScore = -1;
+            for (android.speech.tts.Voice v : tts.getVoices()) {
+                Locale l = v.getLocale();
+                if (l == null || !"en".equals(l.getLanguage())) continue;
+                if (v.getFeatures() != null && v.getFeatures().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)) continue;
+                int score = v.getQuality();
+                if ("IN".equals(l.getCountry())) score += 60;
+                else if ("US".equals(l.getCountry()) || "GB".equals(l.getCountry())) score += 30;
+                if (v.isNetworkConnectionRequired()) score += 20;   // Google's online voices sound better
+                if (score > bestScore) { bestScore = score; best = v; }
+            }
+            if (best != null) {
+                tts.setVoice(best);
+                log("Phone voice: " + best.getName());
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     boolean isRunning() { return running; }
     boolean isSharing() { return screen != null && screen.isActive(); }
 
@@ -191,6 +217,7 @@ public class LiveService extends Service {
             if (c.has("system")) system = c.getString("system");
             if (c.has("voice_on")) voiceOn = c.getBoolean("voice_on");
             if (c.has("voice")) voiceName = c.getString("voice");
+            if (c.has("barge_in")) bargeIn = c.getBoolean("barge_in");
             if (c.has("messages")) {
                 JSONArray m = c.getJSONArray("messages");
                 synchronized (history) {
@@ -309,7 +336,9 @@ public class LiveService extends Service {
     private void startListening() {
         int min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         try {
-            recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, RATE,
+            // VOICE_RECOGNITION: clean speech without switching the phone into "call" mode,
+            // which on many phones turns her voice down. Echo/noise filters are added below.
+            recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, RATE,
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, FRAME * 2 * 20));
         } catch (Exception e) {
             log("Mic failed: " + e);
@@ -340,8 +369,8 @@ public class LiveService extends Service {
         ArrayDeque<short[]> preroll = new ArrayDeque<>();
         ByteArrayOutputStream turn = new ByteArrayOutputStream();
         double noise = -55;         // adaptive background level (dBFS)
-        double echo = -60;          // her own voice leaking into the mic while she talks
-        int above = 0, silence = 0, voiced = 0, frames = 0, barge = 0, meter = 0;
+        double echo = -90;          // loudest recent level of her own voice in the mic
+        int above = 0, silence = 0, voiced = 0, frames = 0, barge = 0, meter = 0, speakingFrames = 0;
         boolean capturing = false;
         try {
             recorder.startRecording();
@@ -363,13 +392,24 @@ public class LiveService extends Service {
             }
 
             State s = state;
+            if (s != State.SPEAKING) speakingFrames = 0;
             if (s == State.THINKING) { above = 0; continue; }
 
             if (s == State.SPEAKING) {
-                // interrupt her only if you're clearly louder than her echo
-                echo = echo * 0.95 + db * 0.05;
-                double gate = Math.max(noise + 20, echo + 9);
-                if (db > gate) barge++; else barge = Math.max(0, barge - 1);
+                speakingFrames++;
+                // Her own voice leaks into the mic. Track its loudest recent level
+                // (not the average), and only let you interrupt when you're clearly
+                // louder than that for about half a second.
+                double gate = Math.max(noise + 25, echo + 5);
+                // learn her echo level only from sounds quieter than the gate, so your voice doesn't raise it
+                if (speakingFrames < BARGE_GRACE_FRAMES || db <= gate) echo = Math.max(db, echo - 0.15);
+                if (!bargeIn || speakingFrames < BARGE_GRACE_FRAMES) {
+                    barge = 0;
+                } else if (db > gate) {
+                    barge++;
+                } else {
+                    barge = Math.max(0, barge - 1);
+                }
                 preroll.addLast(frame.clone());
                 if (preroll.size() > PREROLL_FRAMES) preroll.removeFirst();
                 if (barge >= BARGE_FRAMES) {
@@ -416,7 +456,7 @@ public class LiveService extends Service {
                         setState(State.LISTENING);
                     }
                     turn.reset();
-                    echo = -60;
+                    echo = -90;
                 }
             }
         }
@@ -577,6 +617,10 @@ public class LiveService extends Service {
             c.setRequestProperty("Referer", server + "/");
             try (OutputStream os = c.getOutputStream()) { os.write(b.toString().getBytes(StandardCharsets.UTF_8)); }
             int code = c.getResponseCode();
+            if (code == 429) {
+                MikuLivePlugin.emit("live_error", "voice_limit");
+                throw new Exception("free voice limit reached");
+            }
             if (code != 200) throw new Exception("voice HTTP " + code);
             int rate = 24000;
             try { rate = Integer.parseInt(c.getHeaderField("x-sample-rate")); } catch (Exception ignored) { }
@@ -584,7 +628,7 @@ public class LiveService extends Service {
             int min = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
             t = new AudioTrack.Builder()
                     .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     .setAudioFormat(new AudioFormat.Builder()
                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -610,6 +654,7 @@ public class LiveService extends Service {
                     log("Voice started after " + (System.currentTimeMillis() - t0) + " ms");
                     startProgress(t, text);
                 }
+                boost(buf, n);
                 t.write(buf, 0, n);
                 written += n / 2;
             }
@@ -639,6 +684,18 @@ public class LiveService extends Service {
         }
     }
 
+    /** Makes her voice louder (x2.4) with a soft limiter so it never crackles. */
+    static void boost(byte[] b, int n) {
+        for (int i = 0; i + 1 < n; i += 2) {
+            double v = (short) ((b[i] & 0xff) | (b[i + 1] << 8)) / 32768.0 * 2.4;
+            v = v / (1 + 0.35 * Math.abs(v));             // gentle limiter
+            v = Math.max(-1, Math.min(1, v * 1.3));
+            int x = (int) Math.round(v * 32767);
+            b[i] = (byte) x;
+            b[i + 1] = (byte) (x >> 8);
+        }
+    }
+
     private void startProgress(AudioTrack t, String text) {
         final long start = System.currentTimeMillis();
         Runnable tick = new Runnable() {
@@ -661,7 +718,7 @@ public class LiveService extends Service {
         try {
             t = new AudioTrack.Builder()
                     .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     .setAudioFormat(new AudioFormat.Builder()
                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)

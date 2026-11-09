@@ -14,6 +14,7 @@ const DEFAULTS := {
 	"persona": "Warm, playful and curious. Teases gently, laughs easily, and genuinely wants to hear about my day. Honest with me even when it isn't what I want to hear. Talks casually like a close friend, and is happy to mix in a little Telugu or Hindi when I do.",
 	"voice_on": true,
 	"voice": "Leda",
+	"barge_in": true,
 }
 
 # colours
@@ -288,8 +289,13 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# a tap on Miku (outside the chat UI) closes the keyboard
+	# a tap on Miku (outside the chat UI) closes the keyboard, or stops her talking
 	if (event is InputEventScreenTouch and event.pressed) or (event is InputEventMouseButton and event.pressed):
+		if speaking or vs_active or not speak_queue.is_empty():
+			stop_speaking()
+			if live_on:
+				live.stopSpeaking()
+			status_lbl.text = "Stopped. Listening... just talk" if live_on or mic_on else "Stopped."
 		var owner := get_viewport().gui_get_focus_owner()
 		if owner is LineEdit or owner is TextEdit:
 			owner.release_focus()
@@ -341,7 +347,18 @@ func set_mood(m: String, strength := 0.75, hold := 6.0) -> void:
 func setup_tts() -> void:
 	var voices := DisplayServer.tts_get_voices_for_language("en")
 	var all := DisplayServer.tts_get_voices()
-	for pat in ["en-in", "neerja", "aria", "jenny", "zira", "female", "en-gb", "en-us"]:
+	# prefer Google's online (network) voices: they sound much more natural
+	for v in all:
+		var id := str(v.get("id", "")).to_lower()
+		if "network" in id and str(v.get("language", "")).to_lower().begins_with("en-in"):
+			tts_voice = v.id
+			break
+	if tts_voice == "":
+		for v in all:
+			if "network" in str(v.get("id", "")).to_lower() and str(v.get("language", "")).to_lower().begins_with("en"):
+				tts_voice = v.id
+				break
+	for pat in (["en-in", "neerja", "aria", "jenny", "zira", "female", "en-gb", "en-us"] if tts_voice == "" else []):
 		for v in all:
 			if pat in str(v.get("name", "")).to_lower() or pat in str(v.get("language", "")).to_lower():
 				tts_voice = v.id
@@ -463,6 +480,10 @@ func poll_voice_stream() -> void:
 			elif vs_got_body:
 				vs_reading_done = true   # the whole response has been read
 		HTTPClient.STATUS_BODY:
+			if vs_client.get_response_code() == 429:
+				status_lbl.text = "Her natural voice is out of free uses for now, so she's using the phone voice."
+				_voice_fail("natural voice free limit reached")
+				return
 			if vs_client.get_response_code() != 200:
 				_voice_fail("natural voice unavailable: HTTP %d" % vs_client.get_response_code())
 				return
@@ -511,6 +532,8 @@ func _feed_voice() -> void:
 		var acc := 0.0
 		for i in frames:
 			var v := vs_pending.decode_s16(i * 2) / 32768.0
+			v = v * 2.4
+			v = clampf(v / (1.0 + 0.35 * absf(v)) * 1.3, -1.0, 1.0)   # louder, with a soft limiter
 			buf[i] = Vector2(v, v)
 			acc += v * v
 			if (vs_pushed + i + 1) % block == 0:
@@ -940,6 +963,7 @@ func error_text(code: String) -> String:
 		"offline": "I can't reach the internet right now.",
 		"mic_unavailable": "Couldn't open the microphone. Is another app using it?",
 		"server_old": "The Miku server needs updating (redeploy v4 on Vercel).",
+		"voice_limit": "Her natural voice is out of free uses for now, so she's using the phone voice.",
 	}.get(code, "Something went wrong. Keep talking and I'll try again.")
 
 
@@ -976,7 +1000,7 @@ func _on_live_error(code: String) -> void:
 
 
 func live_config() -> String:
-	return JSON.stringify({"server": SERVER, "system": rules(), "messages": recent_messages(), "voice_on": settings.voice_on, "voice": settings.voice})
+	return JSON.stringify({"server": SERVER, "system": rules(), "messages": recent_messages(), "voice_on": settings.voice_on, "voice": settings.voice, "barge_in": settings.get("barge_in", true)})
 
 
 func toggle_live() -> void:
@@ -1434,7 +1458,28 @@ func open_settings() -> void:
 		speak_reply("Hi %s! This is how I sound." % settings.user_name)
 		settings.voice = keep))
 	col.add_child(vrow)
+	vpick.item_selected.connect(func(i):
+		# a new voice takes effect right away (no need to press Save)
+		settings.voice = VOICES[i][0]
+		save_state()
+		if live_on:
+			live.updateContext(live_config()))
 	fields["voice"] = vpick
+	var interrupt := CheckButton.new()
+	interrupt.text = "Let me interrupt her by talking (Live)"
+	interrupt.button_pressed = settings.get("barge_in", true)
+	interrupt.add_theme_font_size_override("font_size", 18)
+	interrupt.add_theme_color_override("font_color", INK)
+	interrupt.add_theme_color_override("font_pressed_color", INK)
+	interrupt.add_theme_color_override("font_hover_color", INK)
+	interrupt.toggled.connect(func(on):
+		settings.barge_in = on
+		save_state()
+		if live_on:
+			live.updateContext(live_config()))
+	col.add_child(interrupt)
+	var tip_lbl := label("Tip: tap Miku to stop her mid-sentence.", 15, MIST)
+	col.add_child(tip_lbl)
 
 	col.add_child(label("WHAT SHE REMEMBERS", 15, MIST))
 	var mem := ""
@@ -1453,7 +1498,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v8 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v9 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:
