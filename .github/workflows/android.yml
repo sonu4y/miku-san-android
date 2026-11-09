@@ -47,6 +47,17 @@ jobs:
           (cd $S/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$A/espeak-ng-data/")
           rm -rf $S kokoro.tar.bz2 sherpa.aar
           du -sh "$A"
+          # her fast voice (Piper, many speakers): makes speech much faster than real time
+          curl -sSL --retry 5 -o fast.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-libritts_r-medium.tar.bz2"
+          tar xjf fast.tar.bz2
+          F=vits-piper-en_US-libritts_r-medium
+          B=android-plugin/miku-live/src/main/assets/voice-fast
+          mkdir -p "$B/espeak-ng-data"
+          cp $F/en_US-libritts_r-medium.onnx "$B/model.onnx"
+          cp $F/tokens.txt $F/MODEL_CARD "$B/"
+          (cd $F/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$B/espeak-ng-data/")
+          rm -rf $F fast.tar.bz2
+          du -sh "$B"
 
       - name: Build the live-mode plugin (native Android service)
         run: |
@@ -119,7 +130,8 @@ jobs:
           grep -q "SYSTEM_ALERT_WINDOW" manifest.txt && echo "floating bubble permission OK"
           echo "--- on-device voice packed in?"
           unzip -l build/miku-san.apk | grep -E "kokoro/|libsherpa|libonnxruntime" | head -20
-          unzip -l build/miku-san.apk | grep -q "assets/kokoro/model.int8.onnx" && echo "voice model OK"
+          unzip -l build/miku-san.apk | grep -q "assets/kokoro/model.int8.onnx" && echo "HD voice model OK"
+          unzip -l build/miku-san.apk | grep -q "assets/voice-fast/model.onnx" && echo "fast voice model OK"
           unzip -l build/miku-san.apk | grep -q "lib/arm64-v8a/libsherpa-onnx-jni.so" && echo "voice engine OK"
 
       - uses: actions/upload-artifact@v4

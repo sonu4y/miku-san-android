@@ -35,7 +35,7 @@ public class MikuLivePlugin extends GodotPlugin {
         installCrashRecorder();
         try {
             Activity a = getActivity();
-            if (a != null) LocalVoice.prepareAsync(a);
+            if (a != null) LocalVoice.prepareAsync(a, "Miku");
         } catch (Throwable ignored) {
         }
     }
@@ -87,17 +87,15 @@ public class MikuLivePlugin extends GodotPlugin {
 
     /** Starts loading her on-device voice so the first reply is quick. */
     @UsedByGodot
-    public void prepareVoice() {
+    public void prepareVoice(String voice) {
         Context c = ctx();
-        if (c != null) LocalVoice.prepareAsync(c);
+        if (c != null) LocalVoice.prepareAsync(c, voice);
     }
 
     /** "ready", "loading" or the reason it can't work. */
     @UsedByGodot
-    public String voiceStatus() {
-        String f = LocalVoice.failure();
-        if (f != null) return f;
-        return LocalVoice.ready() ? "ready" : "loading";
+    public String voiceStatus(String voice) {
+        return LocalVoice.status(voice);
     }
 
     /** Makes her voice on the phone; audio comes back piece by piece through local_audio. */
@@ -105,7 +103,7 @@ public class MikuLivePlugin extends GodotPlugin {
     public boolean speakLocal(int id, String text, String voice) {
         final LocalVoice.Style st = LocalVoice.style(voice);
         final Context c = ctx();
-        if (st == null || c == null || LocalVoice.failure() != null) return false;
+        if (st == null || c == null || st.engine.status().contains("failed")) return false;
         localWant = id;
         voiceThread.execute(() -> {
             final boolean[] started = {false};

@@ -91,11 +91,13 @@ var sharing := false
 var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
-const VOICES := [["Miku", "Miku: anime girl (on phone, fast)"], ["Sweet", "Sweet (on phone)"], ["Bubbly", "Bubbly (on phone)"], ["Kawaii", "Kawaii: extra high (on phone)"], ["Heart", "Heart: natural English (on phone)"],
+const VOICES := [["Miku", "Miku: cute & instant (on phone)"], ["Sunny", "Sunny: cheerful & instant (on phone)"],
+	["MikuHD", "Miku HD: anime girl (on phone, slower)"], ["Sweet", "Sweet HD (on phone, slower)"], ["Bubbly", "Bubbly HD (on phone, slower)"], ["Kawaii", "Kawaii HD: extra high (on phone, slower)"], ["Heart", "Heart HD: natural English (on phone, slower)"],
 	["Leda", "Leda (online)"], ["Aoede", "Aoede (online)"], ["Zephyr", "Zephyr (online)"], ["Laomedeia", "Laomedeia (online)"], ["Despina", "Despina (online)"], ["Kore", "Kore (online)"]]
-const LOCAL_VOICES := ["Miku", "Sweet", "Bubbly", "Kawaii", "Heart"]   # made on the phone itself: offline, no limits
+const LOCAL_VOICES := ["Miku", "Sunny", "MikuHD", "Sweet", "Bubbly", "Kawaii", "Heart"]   # made on the phone itself: offline, no limits
 var local_id := 0          # which on-device speech is current
-var vs_local := false      # the current voice stream comes from the phone, not the server
+var vs_local := false
+var vs_voice := ""      # the current voice stream comes from the phone, not the server
 var voice_player: AudioStreamPlayer
 var speak_http: HTTPRequest
 var speak_cps := CHARS_PER_SEC        # how fast the current speech moves through the text (for lip-sync)
@@ -355,7 +357,7 @@ func speak_reply(text: String) -> void:
 	if not settings.voice_on:
 		_silent_reply(text)
 		return
-	if settings.voice in LOCAL_VOICES and live != null and str(live.voiceStatus()) in ["ready", "loading"]:
+	if settings.voice in LOCAL_VOICES and live != null and str(live.voiceStatus(settings.voice)) in ["ready", "loading"]:
 		local_voice(text)
 		return
 	stream_voice(text)
@@ -374,7 +376,9 @@ func local_voice(text: String) -> void:
 	vs_active = true
 	vs_started_at = Time.get_ticks_msec() / 1000.0
 	vs_deadline = vs_started_at + 20.0
-	if str(live.voiceStatus()) == "loading":
+	vs_voice = settings.voice
+	live.prepareVoice(vs_voice)
+	if str(live.voiceStatus(vs_voice)) == "loading":
 		status_lbl.text = "Her voice is waking up, one moment..."
 	if not live.speakLocal(local_id, text, settings.voice):
 		vs_local = false
@@ -489,7 +493,7 @@ func _voice_fail(why: String) -> void:
 
 func poll_voice_stream() -> void:
 	if vs_active and vs_local:
-		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline and str(live.voiceStatus()) == "loading":
+		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline and str(live.voiceStatus(vs_voice)) == "loading":
 			vs_deadline += 5.0      # still unpacking/loading her voice (only slow the first time)
 			status_lbl.text = "Her voice is waking up, one moment..."
 		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline:
@@ -1002,7 +1006,7 @@ func setup_live(singleton: Object = null) -> void:
 	live.connect("local_audio", _on_local_audio)
 	live.connect("local_done", _on_local_done)
 	live.connect("local_failed", _on_local_failed)
-	live.prepareVoice()
+	live.prepareVoice(settings.voice)
 	if str(live.getLaunchExtra()) != "":
 		_selftest(str(live.getLaunchExtra()))
 	var crash: String = live.takeLastCrash()
@@ -1016,37 +1020,39 @@ func setup_live(singleton: Object = null) -> void:
 ## Automatic test on an emulator (started with the extra miku_selftest). Prints to the log.
 func _selftest(kind: String) -> void:
 	print("SELFTEST start ", kind)
-	settings.voice = "Miku"
 	settings.voice_on = true
-	for i in 60:
-		await get_tree().create_timer(1.0).timeout
-		if str(live.voiceStatus()) != "loading":
-			break
-	print("SELFTEST voice status: ", live.voiceStatus())
-	for n in 3:
-		speak_reply("Hi Vansh! This is how I sound. Do you like my voice?")
-		var t0 := Time.get_ticks_msec()
-		var heard := false
-		while Time.get_ticks_msec() - t0 < 30000:
-			await get_tree().create_timer(0.25).timeout
-			if speaking and vs_local and vs_playback != null:
-				heard = true
-			if heard and not vs_active:
+	for v in ["Miku", "Sunny", "MikuHD"]:
+		settings.voice = v
+		live.prepareVoice(v)
+		for i in 90:
+			if str(live.voiceStatus(v)) != "loading":
 				break
-		print("SELFTEST preview %d: played=%s status=%s problem=%s" % [n, heard, voice_status, last_problem])
-		# a second preview tapped while the first is still talking
-		if n == 1:
-			speak_reply("First one, interrupted soon.")
-			await get_tree().create_timer(0.8).timeout
-			stop_speaking()
-			speak_reply("Second one plays instead.")
-			await get_tree().create_timer(8.0).timeout
-			print("SELFTEST double-tap: status=%s speaking=%s" % [voice_status, speaking])
+			await get_tree().create_timer(1.0).timeout
+		print("SELFTEST ", v, " status: ", live.voiceStatus(v))
+		for n in 2:
+			speak_reply("Hi Vansh! This is how I sound. Do you like my voice? Tell me everything about your day, okay?")
+			var t0 := Time.get_ticks_msec()
+			var heard := false
+			while Time.get_ticks_msec() - t0 < 40000:
+				await get_tree().create_timer(0.25).timeout
+				if speaking and vs_local and vs_playback != null:
+					heard = true
+				if heard and not vs_active:
+					break
+			print("SELFTEST %s preview %d: played=%s status=%s total=%.1fs problem=%s" % [v, n, heard, voice_status, (Time.get_ticks_msec() - t0) / 1000.0, last_problem])
+	settings.voice = "Miku"
+	# a second preview tapped while the first is still talking
+	speak_reply("First one, interrupted soon. This should stop.")
+	await get_tree().create_timer(0.8).timeout
+	stop_speaking()
+	speak_reply("Second one plays instead.")
+	await get_tree().create_timer(6.0).timeout
+	print("SELFTEST double-tap: status=%s" % voice_status)
 	if kind == "live":
 		toggle_live()
 		await get_tree().create_timer(4.0).timeout
 		print("SELFTEST live on: ", live_on, " state: ", live_state)
-		live.liveTestSay("Yay, live mode works! I can talk to you hands free now.")
+		live.liveTestSay("Yay, live mode works! I can talk to you hands free now. Isn't that cool?")
 		await get_tree().create_timer(15.0).timeout
 	for line in str(live.getLog()).split("\n"):
 		print("SELFTEST | ", line)
@@ -1156,7 +1162,7 @@ func diagnostics() -> String:
 	lines.append("Mic level: " + "|".repeat(bars) + ".".repeat(10 - bars) + ("  (talk to test)" if on else "  (start Live to test)"))
 	lines.append("Voice: " + ("off" if not settings.voice_on else settings.voice + ", last: " + voice_status))
 	if live != null:
-		lines.append("On-phone voice: " + str(live.voiceStatus()))
+		lines.append("On-phone voice: " + str(live.voiceStatus(settings.voice)) + " (fast engine: " + str(live.voiceStatus("Miku")) + ")")
 	lines.append("Last problem: " + last_problem)
 	if live != null:
 		var lg: String = live.getLog()
@@ -1539,6 +1545,8 @@ func open_settings() -> void:
 		# a new voice takes effect right away (no need to press Save)
 		settings.voice = VOICES[i][0]
 		save_state()
+		if live != null:
+			live.prepareVoice(settings.voice)
 		if live_on:
 			live.updateContext(live_config()))
 	fields["voice"] = vpick

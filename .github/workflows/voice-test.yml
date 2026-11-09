@@ -46,6 +46,17 @@ jobs:
           (cd $S/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$A/espeak-ng-data/")
           rm -rf $S kokoro.tar.bz2 sherpa.aar
           du -sh "$A"
+          # her fast voice (Piper, many speakers): makes speech much faster than real time
+          curl -sSL --retry 5 -o fast.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-libritts_r-medium.tar.bz2"
+          tar xjf fast.tar.bz2
+          F=vits-piper-en_US-libritts_r-medium
+          B=android-plugin/miku-live/src/main/assets/voice-fast
+          mkdir -p "$B/espeak-ng-data"
+          cp $F/en_US-libritts_r-medium.onnx "$B/model.onnx"
+          cp $F/tokens.txt $F/MODEL_CARD "$B/"
+          (cd $F/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$B/espeak-ng-data/")
+          rm -rf $F fast.tar.bz2
+          du -sh "$B"
 
       - name: Build the live-mode plugin (native Android service)
         run: |

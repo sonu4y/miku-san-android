@@ -8,6 +8,7 @@ import com.k2fsa.sherpa.onnx.OfflineTts;
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig;
+import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -15,115 +16,172 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Her on-device voice (Kokoro, run by sherpa-onnx). Works offline, has no
- * usage limit, and speaks sentence by sentence so she starts talking fast.
+ * Her on-phone voices (run by sherpa-onnx). Work offline with no usage limit.
  *
- * The model files ship inside the APK under assets/kokoro/. Only the small
- * espeak-ng-data folder is copied to app storage (espeak can't read assets).
+ * Two engines:
+ *  - FAST: a small Piper (VITS) model. Makes speech many times faster than real time,
+ *    so she starts talking almost at once on any phone.
+ *  - HD: Kokoro. More natural and the cutest voices, but needs a strong phone.
+ *
+ * The models ship inside the APK (assets/voice-fast, assets/kokoro) and are
+ * unpacked to app storage once, then loaded from files.
  */
 final class LocalVoice {
-    /** A voice: Kokoro speaker id and how much higher/cuter it's played. */
+    /** A voice: which engine, its speaker id, and how much higher/cuter it's played. */
     static final class Style {
+        final Engine engine;
         final int sid;
         final float pitch;
-        Style(int sid, float pitch) { this.sid = sid; this.pitch = pitch; }
+        Style(Engine engine, int sid, float pitch) { this.engine = engine; this.sid = sid; this.pitch = pitch; }
     }
 
     static Style style(String name) {
         if (name == null) return null;
         switch (name) {
-            case "Miku":   return new Style(40, 1.00f);  // jf_tebukuro: high, anime-girl voice
-            case "Sweet":  return new Style(38, 1.15f);  // jf_gongitsune
-            case "Bubbly": return new Style(39, 1.15f);  // jf_nezumi
-            case "Kawaii": return new Style(37, 1.25f);  // jf_alpha, extra high
-            case "Heart":  return new Style(3, 1.10f);   // af_heart: natural English
-            default: return null;                       // not a local voice (a Gemini voice)
+            // fast voices (default)
+            case "Miku":    return new Style(FAST, FAST_MIKU_SID, FAST_MIKU_PITCH);
+            case "Sunny":   return new Style(FAST, FAST_SUNNY_SID, FAST_SUNNY_PITCH);
+            // HD voices (Kokoro)
+            case "MikuHD":  return new Style(HD, 40, 1.00f);  // jf_tebukuro: high, anime-girl voice
+            case "Sweet":   return new Style(HD, 38, 1.15f);  // jf_gongitsune
+            case "Bubbly":  return new Style(HD, 39, 1.15f);  // jf_nezumi
+            case "Kawaii":  return new Style(HD, 37, 1.25f);  // jf_alpha, extra high
+            case "Heart":   return new Style(HD, 3, 1.10f);   // af_heart: natural English
+            default: return null;                            // not an on-phone voice (a Gemini voice)
         }
     }
 
-    static final int MODEL_RATE = 24000;
-    private static final String DIR = "kokoro";
-    private static final Object lock = new Object();
-    private static OfflineTts tts;
-    private static volatile String failure = null;
-    private static volatile boolean loading = false;
+    // Filled in from a scan of all the fast model's speakers (highest, clearest young voices).
+    static final int FAST_MIKU_SID = 453;      // clearest of the highest young voices
+    static final float FAST_MIKU_PITCH = 1.15f;
+    static final int FAST_SUNNY_SID = 267;     // very expressive, cheerful
+    static final float FAST_SUNNY_PITCH = 1.15f;
 
-    /** Loads the model in the background (call early so the first reply is fast). */
-    static void prepareAsync(Context ctx) {
-        if (tts != null || loading || failure != null) return;
-        final Context app = ctx.getApplicationContext();
-        loading = true;
-        new Thread(() -> {
-            try { get(app); } catch (Throwable ignored) { }
-        }, "miku-voice-load").start();
-    }
+    /** One speech engine: loaded on first use, then kept. */
+    static final class Engine {
+        final String name, assetDir, storeDir;
+        final int rate;
+        final String[] files;
+        private OfflineTts tts;
+        private volatile String failure;
+        private volatile boolean loading;
+        private final Object lock = new Object();
 
-    static String failure() { return failure; }
-    static boolean ready() { return tts != null; }
+        Engine(String name, String assetDir, String storeDir, int rate, String... files) {
+            this.name = name; this.assetDir = assetDir; this.storeDir = storeDir; this.rate = rate; this.files = files;
+        }
 
-    static OfflineTts get(Context ctx) throws Exception {
-        synchronized (lock) {
-            if (tts != null) return tts;
-            if (failure != null) throw new Exception(failure);
-            long t0 = System.currentTimeMillis();
-            try {
-                // the model is unpacked from the APK to app storage once; after that it loads straight from files
-                File dir = unpack(ctx);
-                long t1 = System.currentTimeMillis();
-                OfflineTtsKokoroModelConfig k = new OfflineTtsKokoroModelConfig();
-                k.setModel(new File(dir, "model.int8.onnx").getAbsolutePath());
-                k.setVoices(new File(dir, "voices.bin").getAbsolutePath());
-                k.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
-                k.setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath());
-                k.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
-                k.setLang("en-us");
-                k.setLengthScale(1.0f);
-                OfflineTtsModelConfig m = new OfflineTtsModelConfig();
-                m.setKokoro(k);
-                int cores = Runtime.getRuntime().availableProcessors();
-                m.setNumThreads(cores >= 8 ? 4 : Math.max(1, Math.min(2, cores)));
-                m.setDebug(false);
-                m.setProvider("cpu");
-                OfflineTtsConfig c = new OfflineTtsConfig();
-                c.setModel(m);
-                c.setMaxNumSentences(1);
-                c.setSilenceScale(0.2f);
-                OfflineTts t = new OfflineTts(null, c);
-                long t2 = System.currentTimeMillis();
-                t.generate("Hi.", 40, 1.0f);   // warm up so the first real reply is quick
-                LiveService.log("On-phone voice ready: unpack " + (t1 - t0) + " ms, load " + (t2 - t1) + " ms, warm-up "
-                        + (System.currentTimeMillis() - t2) + " ms, " + m.getNumThreads() + " threads of " + cores);
-                tts = t;
-                return t;
-            } catch (Throwable e) {
-                failure = "on-phone voice failed to load: " + e;
-                LiveService.log(failure);
-                throw new Exception(failure);
-            } finally {
-                loading = false;
+        String status() {
+            if (failure != null) return failure;
+            if (tts != null) return "ready";
+            return "loading";
+        }
+
+        void prepareAsync(Context ctx) {
+            if (tts != null || loading || failure != null) return;
+            final Context app = ctx.getApplicationContext();
+            loading = true;
+            new Thread(() -> {
+                try { get(app); } catch (Throwable ignored) { }
+            }, "miku-voice-" + name).start();
+        }
+
+        OfflineTts get(Context ctx) throws Exception {
+            synchronized (lock) {
+                if (tts != null) return tts;
+                if (failure != null) throw new Exception(failure);
+                loading = true;
+                long t0 = System.currentTimeMillis();
+                try {
+                    File dir = unpack(ctx, this);
+                    long t1 = System.currentTimeMillis();
+                    OfflineTtsModelConfig m = new OfflineTtsModelConfig();
+                    if (this == HD) {
+                        OfflineTtsKokoroModelConfig k = new OfflineTtsKokoroModelConfig();
+                        k.setModel(new File(dir, files[0]).getAbsolutePath());
+                        k.setVoices(new File(dir, "voices.bin").getAbsolutePath());
+                        k.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
+                        k.setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath());
+                        k.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
+                        k.setLang("en-us");
+                        k.setLengthScale(1.0f);
+                        m.setKokoro(k);
+                    } else {
+                        OfflineTtsVitsModelConfig v = new OfflineTtsVitsModelConfig();
+                        v.setModel(new File(dir, files[0]).getAbsolutePath());
+                        v.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
+                        v.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
+                        v.setLengthScale(1.0f);
+                        m.setVits(v);
+                    }
+                    int cores = Runtime.getRuntime().availableProcessors();
+                    m.setNumThreads(cores >= 6 ? 4 : Math.max(1, Math.min(2, cores)));
+                    m.setDebug(false);
+                    m.setProvider("cpu");
+                    OfflineTtsConfig c = new OfflineTtsConfig();
+                    c.setModel(m);
+                    c.setMaxNumSentences(1);
+                    c.setSilenceScale(0.2f);
+                    OfflineTts t = new OfflineTts(null, c);
+                    long t2 = System.currentTimeMillis();
+                    t.generate("Hi.", 0, 1.0f);   // warm up so the first real reply is quick
+                    LiveService.log(name + " voice ready: unpack " + (t1 - t0) + " ms, load " + (t2 - t1) + " ms, warm-up "
+                            + (System.currentTimeMillis() - t2) + " ms, " + m.getNumThreads() + " threads of " + cores);
+                    tts = t;
+                    return t;
+                } catch (Throwable e) {
+                    failure = name + " voice failed to load: " + e;
+                    LiveService.log(failure);
+                    throw new Exception(failure);
+                } finally {
+                    loading = false;
+                }
             }
         }
+
+        GeneratedAudio generate(Context ctx, String text, int sid, float speed) throws Exception {
+            OfflineTts t = get(ctx);
+            synchronized (lock) { return t.generate(text, sid, speed); }
+        }
     }
 
-    private static final String[] FILES = {"model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt"};
+    static final Engine FAST = new Engine("Fast", "voice-fast", "voice-fast-v1", 22050,
+            "model.onnx", "tokens.txt");
+    static final Engine HD = new Engine("HD", "kokoro", "kokoro-v2", 24000,
+            "model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt");
 
-    private static File unpack(Context ctx) throws Exception {
-        File root = new File(ctx.getFilesDir(), "kokoro-v2");
+    /** Loads the engine for this voice in the background (fast engine always). */
+    static void prepareAsync(Context ctx, String voice) {
+        FAST.prepareAsync(ctx);
+        Style st = style(voice);
+        if (st != null && st.engine == HD) HD.prepareAsync(ctx);
+    }
+
+    /** "ready", "loading" or why it can't work, for this voice. */
+    static String status(String voice) {
+        Style st = style(voice);
+        return st == null ? "not an on-phone voice" : st.engine.status();
+    }
+
+    private static File unpack(Context ctx, Engine e) throws Exception {
+        File root = new File(ctx.getFilesDir(), e.storeDir);
         File done = new File(root, ".done");
         if (done.exists()) return root;
         AssetManager am = ctx.getAssets();
         long free = ctx.getFilesDir().getUsableSpace();
-        if (free < 200L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free, needs 160 MB)");
-        // remove older copies
-        File old = new File(ctx.getFilesDir(), "kokoro-v1");
-        if (old.exists()) deleteAll(old);
+        if (free < 250L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free)");
+        for (String old : new String[]{"kokoro-v1"}) {
+            File o = new File(ctx.getFilesDir(), old);
+            if (o.exists()) deleteAll(o);
+        }
         root.mkdirs();
-        for (String f : FILES) copyAsset(am, DIR + "/" + f, new File(root, f));
-        copyAssetDir(am, DIR + "/espeak-ng-data", new File(root, "espeak-ng-data"));
+        for (String f : e.files) copyAsset(am, e.assetDir + "/" + f, new File(root, f));
+        copyAssetDir(am, e.assetDir + "/espeak-ng-data", new File(root, "espeak-ng-data"));
         new FileOutputStream(done).close();
         return root;
     }
@@ -201,18 +259,16 @@ final class LocalVoice {
 
     /**
      * Makes speech for the whole text, handing each piece to the sink as soon as it's ready.
-     * The next piece is made while the previous one plays. Blocks until done.
+     * Blocks until done.
      */
     static void speak(Context ctx, String text, Style st, Sink sink) throws Exception {
-        OfflineTts t = get(ctx);
         float speed = 1.0f / st.pitch;   // played back faster/higher, so speak slower to keep a normal pace
         for (String piece : chunks(text)) {
-            GeneratedAudio a;
             long g0 = System.currentTimeMillis();
-            synchronized (lock) { a = t.generate(piece, st.sid, speed); }
+            GeneratedAudio a = st.engine.generate(ctx, piece, st.sid, speed);
             float[] f = a.getSamples();
-            LiveService.log(String.format(java.util.Locale.US, "Voice piece: %d chars -> %.1f s of audio in %d ms",
-                    piece.length(), f.length / (float) MODEL_RATE, System.currentTimeMillis() - g0));
+            LiveService.log(String.format(Locale.US, "%s voice: %d chars -> %.1f s of audio in %d ms",
+                    st.engine.name, piece.length(), f.length / (float) st.engine.rate, System.currentTimeMillis() - g0));
             byte[] b = new byte[f.length * 2];
             for (int i = 0; i < f.length; i++) {
                 int x = Math.round(Math.max(-1f, Math.min(1f, f[i])) * 32767f);
@@ -224,6 +280,6 @@ final class LocalVoice {
     }
 
     static int playbackRate(Style st) {
-        return Math.round(MODEL_RATE * st.pitch);
+        return Math.round(st.engine.rate * st.pitch);
     }
 }

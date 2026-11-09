@@ -107,7 +107,7 @@ public class LiveService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        LocalVoice.prepareAsync(this);
+        LocalVoice.prepareAsync(this, "Miku");
         instance = this;
         bubble = new Bubble(this);
         screen = new ScreenGrabber(this);
@@ -169,6 +169,7 @@ public class LiveService extends Service {
             if (c.has("voice_on")) voiceOn = c.getBoolean("voice_on");
             if (c.has("voice")) voiceName = c.getString("voice");
             if (c.has("barge_in")) bargeIn = c.getBoolean("barge_in");
+            LocalVoice.prepareAsync(this, voiceName);
             if (c.has("messages")) {
                 JSONArray m = c.getJSONArray("messages");
                 synchronized (history) {
@@ -492,7 +493,7 @@ public class LiveService extends Service {
             String say = spokenText(reply);
             if (voiceOn && !say.isEmpty()) {
                 LocalVoice.Style st = LocalVoice.style(voiceName);
-                if (st != null && LocalVoice.failure() == null) speakLocal(say, st);
+                if (st != null && !st.engine.status().contains("failed")) speakLocal(say, st);
                 else streamVoice(say);
             } else {
                 silentReply(say);
@@ -545,7 +546,7 @@ public class LiveService extends Service {
             log("Test reply: " + text);
             LocalVoice.Style st = LocalVoice.style(voiceName);
             if (!voiceOn) silentReply(text);
-            else if (st != null && LocalVoice.failure() == null) speakLocal(text, st);
+            else if (st != null && !st.engine.status().contains("failed")) speakLocal(text, st);
             else streamVoice(text);
         });
     }
