@@ -229,6 +229,7 @@ func _process(delta: float) -> void:
 	if mic_on:
 		listen(delta)
 	follow_keyboard(delta)
+	poll_voice_stream()
 	if diag_lbl and is_instance_valid(diag_lbl):
 		diag_lbl.text = diagnostics()
 	if level_bar and level_bar.visible:
@@ -372,16 +373,172 @@ func speak_reply(text: String) -> void:
 	if not settings.voice_on or settings.get("voice", "Leda") == "phone":
 		_say_with_phone(text)
 		return
-	if speak_http == null:
-		speak_http = HTTPRequest.new()
-		speak_http.timeout = 30
-		add_child(speak_http)
-		speak_http.request_completed.connect(_on_speech)
-	speak_http.cancel_request()
-	pending_speech = text
-	var body := JSON.stringify({"text": text, "voice": settings.voice})
-	if speak_http.request(SERVER + "/api/speak", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body) != OK:
+	stream_voice(text)
+
+
+# --------------------------------------------- streamed natural voice --
+# Her voice is downloaded as raw audio and played while it arrives, so she
+# starts talking about a second after the reply instead of waiting for all of it.
+const VOICE_FIRST_AUDIO_TIMEOUT := 4.5
+var vs_client: HTTPClient
+var vs_text := ""
+var vs_body := ""
+var vs_requested := false
+var vs_deadline := 0.0
+var vs_started_at := 0.0
+var vs_rate := 24000
+var vs_pending := PackedByteArray()
+var vs_reading_done := false
+var vs_got_body := false
+var vs_pushed := 0
+var vs_env := PackedFloat32Array()       # loudness per 20 ms, for lip-sync
+var vs_player: AudioStreamPlayer
+var vs_playback: AudioStreamGeneratorPlayback
+var vs_active := false
+
+
+func stream_voice(text: String) -> void:
+	stop_voice_stream()
+	var url := SERVER
+	var tls := url.begins_with("https://")
+	var rest := url.substr(8 if tls else 7)
+	var host := rest.get_slice("/", 0)
+	var port := 443 if tls else 80
+	if ":" in host:
+		port = int(host.get_slice(":", 1))
+		host = host.get_slice(":", 0)
+	vs_client = HTTPClient.new()
+	vs_client.read_chunk_size = 8192
+	var err := vs_client.connect_to_host(host, port, TLSOptions.client() if tls else null)
+	if err != OK:
+		voice_status = "phone voice (couldn't connect)"
 		_say_with_phone(text)
+		return
+	vs_text = text
+	vs_body = JSON.stringify({"text": text, "voice": settings.voice, "stream": true})
+	vs_requested = false
+	vs_reading_done = false
+	vs_got_body = false
+	vs_pending.clear()
+	vs_env.clear()
+	vs_pushed = 0
+	vs_active = true
+	vs_started_at = Time.get_ticks_msec() / 1000.0
+	vs_deadline = vs_started_at + VOICE_FIRST_AUDIO_TIMEOUT
+
+
+func stop_voice_stream() -> void:
+	vs_active = false
+	if vs_client:
+		vs_client.close()
+		vs_client = null
+	if vs_player:
+		vs_player.stop()
+	vs_playback = null
+
+
+func _voice_fail(why: String) -> void:
+	var text := vs_text
+	var had_audio := vs_playback != null
+	stop_voice_stream()
+	if not had_audio:
+		voice_status = "phone voice (" + why + ")"
+		_say_with_phone(text)
+
+
+func poll_voice_stream() -> void:
+	if not vs_active or vs_client == null:
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	if vs_playback == null and now > vs_deadline:
+		_voice_fail("natural voice too slow")
+		return
+	vs_client.poll()
+	var st := vs_client.get_status()
+	match st:
+		HTTPClient.STATUS_CONNECTED:
+			if not vs_requested:
+				vs_requested = true
+				vs_client.request(HTTPClient.METHOD_POST, "/api/speak", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], vs_body)
+			elif vs_got_body:
+				vs_reading_done = true   # the whole response has been read
+		HTTPClient.STATUS_BODY:
+			if vs_client.get_response_code() != 200:
+				_voice_fail("natural voice unavailable: HTTP %d" % vs_client.get_response_code())
+				return
+			if vs_playback == null:
+				var h := vs_client.get_response_headers_as_dictionary()
+				for k in h:
+					if str(k).to_lower() == "x-sample-rate":
+						vs_rate = int(h[k])
+			vs_got_body = true
+			var chunk := vs_client.read_response_body_chunk()
+			if chunk.size() > 0:
+				vs_pending.append_array(chunk)
+		HTTPClient.STATUS_DISCONNECTED, HTTPClient.STATUS_CANT_CONNECT, HTTPClient.STATUS_CANT_RESOLVE, HTTPClient.STATUS_CONNECTION_ERROR, HTTPClient.STATUS_TLS_HANDSHAKE_ERROR:
+			if vs_requested and vs_playback != null:
+				vs_reading_done = true
+			else:
+				_voice_fail("connection problem")
+				return
+	_feed_voice()
+
+
+func _feed_voice() -> void:
+	if vs_pending.size() >= 2 and vs_playback == null:
+		if vs_player == null:
+			vs_player = AudioStreamPlayer.new()
+			add_child(vs_player)
+		var gen := AudioStreamGenerator.new()
+		gen.mix_rate = vs_rate
+		gen.buffer_length = 30.0
+		vs_player.stream = gen
+		vs_player.play()
+		vs_playback = vs_player.get_stream_playback()
+		speaking_text = vs_text
+		speak_cps = CHARS_PER_SEC
+		speak_start = Time.get_ticks_msec() / 1000.0
+		speak_idx = 0
+		speaking = true
+		voice_status = "natural (%s), started after %.1f s" % [settings.voice, speak_start - vs_started_at]
+	if vs_playback == null:
+		return
+	var frames := mini(vs_pending.size() / 2, vs_playback.get_frames_available())
+	if frames > 0:
+		var buf := PackedVector2Array()
+		buf.resize(frames)
+		var block := vs_rate / 50
+		var acc := 0.0
+		for i in frames:
+			var v := vs_pending.decode_s16(i * 2) / 32768.0
+			buf[i] = Vector2(v, v)
+			acc += v * v
+			if (vs_pushed + i + 1) % block == 0:
+				vs_env.append(sqrt(acc / block))
+				acc = 0.0
+		vs_playback.push_buffer(buf)
+		vs_pushed += frames
+		vs_pending = vs_pending.slice(frames * 2)
+	# finished once everything has been downloaded and played
+	if vs_reading_done and vs_pending.size() < 2:
+		var cap := int(30.0 * vs_rate)
+		var played := vs_pushed - (cap - vs_playback.get_frames_available())
+		var audio_end := speak_start + float(vs_pushed) / vs_rate + 0.3   # backstop if the device doesn't report playback
+		var now := Time.get_ticks_msec() / 1000.0
+		# audio can't play faster than real time, so also wait for the clock (avoids cutting her off)
+		if (played >= vs_pushed - vs_rate / 20 and now > audio_end - 0.25) or now > audio_end + 2.0:
+			stop_voice_stream()
+			speaking = false
+
+
+## how loud her voice is right now (0..1), for the mouth
+func voice_loudness() -> float:
+	if vs_playback == null or vs_env.is_empty():
+		return -1.0
+	var idx := int((Time.get_ticks_msec() / 1000.0 - speak_start) * 50.0)   # 20 ms blocks since she started
+	if idx >= vs_env.size():
+		return 0.0
+	return clampf(vs_env[maxi(0, idx)] * 5.0, 0.0, 1.0)
 
 
 func _on_speech(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -457,6 +614,7 @@ func stop_speaking() -> void:
 	pending_speech = ""
 	if voice_player:
 		voice_player.stop()
+	stop_voice_stream()
 	speaking = false
 	flap_until = 0.0
 
@@ -473,6 +631,15 @@ func viseme() -> Dictionary:
 		i = int((now - flap_start) * CHARS_PER_SEC)
 	else:
 		return {}
+	var loud := voice_loudness()
+	if loud >= 0.0:
+		# mouth follows the real loudness of her voice; the letter picks the shape
+		if loud < 0.06:
+			return {}
+		var shape := "aa"
+		if i >= 0 and i < text.length() and VOWEL.has(text[i].to_lower()):
+			shape = VOWEL[text[i].to_lower()]
+		return {shape: clampf(loud, 0.15, 0.85)}
 	if i < 0 or i >= text.length():
 		return {}
 	var ch := text[i].to_lower()
@@ -725,8 +892,6 @@ func transcribe(frames: PackedVector2Array) -> void:
 	status_lbl.text = "Thinking..."
 	set_mood("neutral")
 	var req := {"system": rules(), "messages": recent_messages(), "audio": Marshalls.raw_to_base64(make_wav(frames))}
-	if settings.voice_on and settings.voice != "phone":
-		req["voice"] = settings.voice
 	var body := JSON.stringify(req)
 	var err := hear_http.request(SERVER + "/api/talk", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body)
 	if err != OK:
@@ -1286,6 +1451,11 @@ func open_settings() -> void:
 	var dr := HBoxContainer.new()
 	dr.add_theme_constant_override("separation", 10)
 	dr.add_child(make_button("Test server", check_server))
+	var copy_btn := make_button("Copy report", func(): pass)
+	copy_btn.pressed.connect(func():
+		DisplayServer.clipboard_set("Miku-san v8 mic check\n" + diagnostics())
+		copy_btn.text = "Copied!")
+	dr.add_child(copy_btn)
 	if live != null:
 		dr.add_child(make_button("Allow mic", func(): live.requestPermissions()))
 	col.add_child(dr)

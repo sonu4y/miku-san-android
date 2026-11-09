@@ -455,7 +455,6 @@ public class LiveService extends Service {
             body.put("audio", Base64.encodeToString(wav(pcm), Base64.NO_WRAP));
             String shot = screen.isActive() ? screen.grabJpegBase64() : null;
             if (shot != null) body.put("image", shot);
-            if (voiceOn && !"phone".equals(voiceName)) body.put("voice", voiceName);
             long t0 = System.currentTimeMillis();
 
             HttpURLConnection c = (HttpURLConnection) new URL(server + "/api/talk").openConnection();
@@ -500,13 +499,11 @@ public class LiveService extends Service {
                 MikuLivePlugin.emit("live_heard", heard);
                 MikuLivePlugin.emit("live_reply", reply);
             }
-            String audio = r.optString("audio", "");
-            if (!audio.isEmpty()) {
-                log("Speaking with natural voice (" + r.optString("voice", voiceName) + ")");
-                playPcm(Base64.decode(audio, Base64.DEFAULT), r.optInt("rate", 24000), spokenText(reply));
+            String say = spokenText(reply);
+            if (voiceOn && !"phone".equals(voiceName) && !say.isEmpty()) {
+                streamVoice(say);
             } else {
-                if (voiceOn && !"phone".equals(voiceName)) log("Natural voice unavailable, using phone voice");
-                speak(spokenText(reply));
+                speak(say);
             }
         } catch (Exception e) {
             Log.w(TAG, "turn failed", e);
@@ -552,6 +549,107 @@ public class LiveService extends Service {
         MikuLivePlugin.emit("live_speak_start", text);
         Bundle p = new Bundle();
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, p, "miku-" + System.currentTimeMillis());
+    }
+
+    private volatile boolean streamCancel = false;
+    private volatile HttpURLConnection streamConn;
+
+    /**
+     * Streams her natural voice from the server and plays it while it downloads.
+     * If no audio arrives within a few seconds, uses the phone's voice instead.
+     */
+    private void streamVoice(String text) {
+        streamCancel = false;
+        long t0 = System.currentTimeMillis();
+        HttpURLConnection c = null;
+        AudioTrack t = null;
+        boolean started = false;
+        try {
+            JSONObject b = new JSONObject().put("text", text).put("voice", voiceName).put("stream", true);
+            c = (HttpURLConnection) new URL(server + "/api/speak").openConnection();
+            streamConn = c;
+            c.setRequestMethod("POST");
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(5000);          // no audio within 5 s: give up and use the phone voice
+            c.setDoOutput(true);
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("Origin", server);
+            c.setRequestProperty("Referer", server + "/");
+            try (OutputStream os = c.getOutputStream()) { os.write(b.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = c.getResponseCode();
+            if (code != 200) throw new Exception("voice HTTP " + code);
+            int rate = 24000;
+            try { rate = Integer.parseInt(c.getHeaderField("x-sample-rate")); } catch (Exception ignored) { }
+            InputStream in = c.getInputStream();
+            int min = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            t = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(rate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setBufferSizeInBytes(Math.max(min * 4, rate))
+                    .build();
+            byte[] buf = new byte[4096];
+            int carry = -1;
+            long written = 0;
+            int n;
+            while (!streamCancel && (n = in.read(buf, carry >= 0 ? 1 : 0, buf.length - 1)) > 0) {
+                if (carry >= 0) { buf[0] = (byte) carry; n += 1; carry = -1; }
+                if ((n & 1) == 1) { carry = buf[n - 1] & 0xff; n -= 1; }
+                if (n == 0) continue;
+                if (!started) {
+                    started = true;
+                    track = t;
+                    setState(State.SPEAKING);
+                    MikuLivePlugin.emit("live_speak_start", text);
+                    t.play();
+                    log("Voice started after " + (System.currentTimeMillis() - t0) + " ms");
+                    startProgress(t, text);
+                }
+                t.write(buf, 0, n);
+                written += n / 2;
+            }
+            in.close();
+            if (started && !streamCancel) {
+                // let the rest play out
+                while (!streamCancel && track == t) {
+                    int pos;
+                    try { pos = t.getPlaybackHeadPosition(); } catch (Exception e) { break; }
+                    if (pos >= written - rate / 50) break;
+                    Thread.sleep(50);
+                }
+                finishedSpeaking();
+            }
+        } catch (Exception e) {
+            if (!started && !streamCancel && running) {
+                log("Natural voice " + (e instanceof java.net.SocketTimeoutException ? "too slow" : "failed (" + e.getMessage() + ")") + ", using phone voice");
+                if (t != null) t.release();
+                speak(text);
+                return;
+            }
+            if (started) finishedSpeaking();
+        } finally {
+            streamConn = null;
+            if (c != null) c.disconnect();
+            if (!started && t != null) t.release();
+        }
+    }
+
+    private void startProgress(AudioTrack t, String text) {
+        final long start = System.currentTimeMillis();
+        Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (track != t || state != State.SPEAKING) return;
+                long ms = System.currentTimeMillis() - start;
+                MikuLivePlugin.emit("live_speak_progress", (int) Math.min(text.length() - 1, ms * 14 / 1000));
+                main.postDelayed(this, 80);
+            }
+        };
+        main.postDelayed(tick, 80);
     }
 
     /** Plays her natural (server-made) voice and reports progress for lip-sync. */
@@ -606,6 +704,9 @@ public class LiveService extends Service {
 
     void interrupt() {
         if (state != State.SPEAKING) return;
+        streamCancel = true;
+        HttpURLConnection sc = streamConn;
+        if (sc != null) { try { sc.disconnect(); } catch (Exception ignored) { } }
         if (tts != null) tts.stop();
         stopTrack();
         log("Interrupted by you");
