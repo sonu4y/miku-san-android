@@ -26,6 +26,26 @@ jobs:
         with:
           gradle-version: "8.5"
 
+      - name: Get her on-device voice (Kokoro via sherpa-onnx)
+        run: |
+          SV=1.12.40
+          curl -sSL --retry 5 -o sherpa.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SV}/sherpa-onnx-${SV}.aar"
+          mkdir -p android-plugin/miku-live/libs
+          unzip -p sherpa.aar classes.jar > android-plugin/miku-live/libs/sherpa-onnx-classes.jar
+          # only phone chips (arm); drop the emulator (x86) libraries and the unused C/C++ API libs
+          zip -q -d sherpa.aar 'jni/x86/*' 'jni/x86_64/*' 'jni/*/libsherpa-onnx-c-api.so' 'jni/*/libsherpa-onnx-cxx-api.so' || true
+          cp sherpa.aar addons/sherpa-onnx.aar
+          unzip -l addons/sherpa-onnx.aar
+          curl -sSL --retry 5 -o kokoro.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
+          tar xjf kokoro.tar.bz2
+          S=kokoro-int8-multi-lang-v1_0
+          A=android-plugin/miku-live/src/main/assets/kokoro
+          mkdir -p "$A/espeak-ng-data"
+          cp $S/model.int8.onnx $S/voices.bin $S/tokens.txt $S/lexicon-us-en.txt $S/LICENSE "$A/"
+          (cd $S/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$A/espeak-ng-data/")
+          rm -rf $S kokoro.tar.bz2 sherpa.aar
+          du -sh "$A"
+
       - name: Build the live-mode plugin (native Android service)
         run: |
           cd android-plugin
@@ -67,6 +87,7 @@ jobs:
           ./godot --headless --install-android-build-template --quit || true
           test -d android/build || (mkdir -p android/build && unzip -q "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_source.zip" -d android/build && echo "${GODOT_VERSION}.stable" > android/.build_version)
           ls android/build | head
+          grep -n "addons" android/build/build.gradle || true
 
       - name: Export APK (release, signed with the same key every build)
         env:
@@ -94,6 +115,10 @@ jobs:
           grep -q "com.sonu4y.mikulive.LiveService" manifest.txt && echo "LiveService declared"
           grep -q "FOREGROUND_SERVICE_MICROPHONE" manifest.txt && echo "background mic permission OK"
           grep -q "SYSTEM_ALERT_WINDOW" manifest.txt && echo "floating bubble permission OK"
+          echo "--- on-device voice packed in?"
+          unzip -l build/miku-san.apk | grep -E "kokoro/|libsherpa|libonnxruntime" | head -20
+          unzip -l build/miku-san.apk | grep -q "assets/kokoro/model.int8.onnx" && echo "voice model OK"
+          unzip -l build/miku-san.apk | grep -q "lib/arm64-v8a/libsherpa-onnx-jni.so" && echo "voice engine OK"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,7 +128,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v10-build-${{ github.run_number }}
-          name: Miku-san v9 APK (build ${{ github.run_number }})
-          body: "Live mode: talk hands-free like Gemini Live, keeps going in other apps (floating bubble), and can see your screen. Download miku-san.apk below and open it on your phone to install."
+          tag_name: v11-build-${{ github.run_number }}
+          name: Miku-san v11 APK (build ${{ github.run_number }})
+          body: "Her own cute voice now runs on your phone: offline, fast, no limits. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
           files: build/miku-san.apk

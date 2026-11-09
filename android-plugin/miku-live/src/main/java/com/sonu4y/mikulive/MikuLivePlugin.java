@@ -33,6 +33,11 @@ public class MikuLivePlugin extends GodotPlugin {
         super(godot);
         instance = this;
         installCrashRecorder();
+        try {
+            Activity a = getActivity();
+            if (a != null) LocalVoice.prepareAsync(a);
+        } catch (Throwable ignored) {
+        }
     }
 
     /** Saves the reason for a crash so the app can show it in Mic check next time. */
@@ -76,6 +81,57 @@ public class MikuLivePlugin extends GodotPlugin {
         }
     }
 
+    // ----------------------------------------------------- on-device voice --
+    private static volatile int localCancel = -1;
+    private final java.util.concurrent.ExecutorService voiceThread = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    /** Starts loading her on-device voice so the first reply is quick. */
+    @UsedByGodot
+    public void prepareVoice() {
+        Context c = ctx();
+        if (c != null) LocalVoice.prepareAsync(c);
+    }
+
+    /** "ready", "loading" or the reason it can't work. */
+    @UsedByGodot
+    public String voiceStatus() {
+        String f = LocalVoice.failure();
+        if (f != null) return f;
+        return LocalVoice.ready() ? "ready" : "loading";
+    }
+
+    /** Makes her voice on the phone; audio comes back piece by piece through local_audio. */
+    @UsedByGodot
+    public boolean speakLocal(int id, String text, String voice) {
+        final LocalVoice.Style st = LocalVoice.style(voice);
+        final Context c = ctx();
+        if (st == null || c == null || LocalVoice.failure() != null) return false;
+        localCancel = -1;
+        voiceThread.execute(() -> {
+            final boolean[] started = {false};
+            try {
+                LocalVoice.speak(c, text, st, pcm -> {
+                    if (localCancel == id) return false;
+                    if (!started[0]) {
+                        started[0] = true;
+                        emit("local_start", id, LocalVoice.playbackRate(st));
+                    }
+                    emit("local_audio", id, pcm);
+                    return true;
+                });
+                emit("local_done", id);
+            } catch (Throwable e) {
+                emit("local_failed", id, String.valueOf(e.getMessage()));
+            }
+        });
+        return true;
+    }
+
+    @UsedByGodot
+    public void stopLocal(int id) {
+        localCancel = id;
+    }
+
     @UsedByGodot
     public String getLog() {
         return LiveService.getLog();
@@ -99,6 +155,10 @@ public class MikuLivePlugin extends GodotPlugin {
         s.add(new SignalInfo("live_error", String.class));
         s.add(new SignalInfo("screen_share", Boolean.class));
         s.add(new SignalInfo("permissions_done", Boolean.class));
+        s.add(new SignalInfo("local_start", Integer.class, Integer.class));     // id, sample rate
+        s.add(new SignalInfo("local_audio", Integer.class, byte[].class));      // id, 16-bit mono PCM
+        s.add(new SignalInfo("local_done", Integer.class));
+        s.add(new SignalInfo("local_failed", Integer.class, String.class));
         return s;
     }
 

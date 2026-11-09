@@ -107,6 +107,7 @@ public class LiveService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        LocalVoice.prepareAsync(this);
         instance = this;
         bubble = new Bubble(this);
         screen = new ScreenGrabber(this);
@@ -490,7 +491,9 @@ public class LiveService extends Service {
             }
             String say = spokenText(reply);
             if (voiceOn && !say.isEmpty()) {
-                streamVoice(say);
+                LocalVoice.Style st = LocalVoice.style(voiceName);
+                if (st != null && LocalVoice.failure() == null) speakLocal(say, st);
+                else streamVoice(say);
             } else {
                 silentReply(say);
             }
@@ -534,6 +537,65 @@ public class LiveService extends Service {
     }
 
     private volatile boolean streamCancel = false;
+
+    /** Her on-device voice: made sentence by sentence on the phone and played as each piece is ready. */
+    private void speakLocal(String text, LocalVoice.Style st) {
+        streamCancel = false;
+        final long t0 = System.currentTimeMillis();
+        final int rate = LocalVoice.playbackRate(st);
+        final AudioTrack[] holder = new AudioTrack[1];
+        final long[] written = {0};
+        try {
+            LocalVoice.speak(this, text, st, pcm -> {
+                if (streamCancel || !running) return false;
+                AudioTrack t = holder[0];
+                if (t == null) {
+                    t = new AudioTrack.Builder()
+                            .setAudioAttributes(new AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                            .setAudioFormat(new AudioFormat.Builder()
+                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                    .setSampleRate(rate)
+                                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                            .setTransferMode(AudioTrack.MODE_STREAM)
+                            .setBufferSizeInBytes(rate * 2 * 30)   // 30 s, so making the next piece never waits on playback
+                            .build();
+                    holder[0] = t;
+                    track = t;
+                    setState(State.SPEAKING);
+                    MikuLivePlugin.emit("live_speak_start", text);
+                    t.play();
+                    log("On-device voice started after " + (System.currentTimeMillis() - t0) + " ms");
+                    startProgress(t, text);
+                }
+                if (track != t) return false;
+                boost(pcm, pcm.length);
+                t.write(pcm, 0, pcm.length);
+                written[0] += pcm.length / 2;
+                return true;
+            });
+            AudioTrack t = holder[0];
+            if (t == null) {
+                if (!streamCancel && running) silentReply(text);
+                return;
+            }
+            while (!streamCancel && track == t) {
+                int pos;
+                try { pos = t.getPlaybackHeadPosition(); } catch (Exception e) { break; }
+                if (pos >= written[0] - rate / 50) break;
+                Thread.sleep(50);
+            }
+            if (!streamCancel) finishedSpeaking();
+        } catch (Exception e) {
+            if (holder[0] == null && !streamCancel && running) {
+                log("On-device voice problem (" + e.getMessage() + "), trying the online voice");
+                streamVoice(text);
+            } else if (holder[0] != null) {
+                finishedSpeaking();
+            }
+        }
+    }
     private volatile HttpURLConnection streamConn;
 
     /**
@@ -547,7 +609,7 @@ public class LiveService extends Service {
         AudioTrack t = null;
         boolean started = false;
         try {
-            JSONObject b = new JSONObject().put("text", text).put("voice", voiceName).put("stream", true);
+            JSONObject b = new JSONObject().put("text", text).put("voice", LocalVoice.style(voiceName) != null ? "Leda" : voiceName).put("stream", true);
             c = (HttpURLConnection) new URL(server + "/api/speak").openConnection();
             streamConn = c;
             c.setRequestMethod("POST");

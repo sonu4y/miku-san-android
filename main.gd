@@ -13,7 +13,8 @@ const DEFAULTS := {
 	"user_name": "friend",
 	"persona": "Warm, playful and curious. Teases gently, laughs easily, and genuinely wants to hear about my day. Honest with me even when it isn't what I want to hear. Talks casually like a close friend, and is happy to mix in a little Telugu or Hindi when I do.",
 	"voice_on": true,
-	"voice": "Leda",
+	"voice": "Miku",
+	"voice_v11": true,
 	"barge_in": true,
 }
 
@@ -90,7 +91,11 @@ var sharing := false
 var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
-const VOICES := [["Leda", "Leda: youthful"], ["Aoede", "Aoede: breezy"], ["Zephyr", "Zephyr: bright"], ["Laomedeia", "Laomedeia: upbeat"], ["Despina", "Despina: smooth"], ["Kore", "Kore: firm"]]
+const VOICES := [["Miku", "Miku: anime girl (on phone, fast)"], ["Sweet", "Sweet (on phone)"], ["Bubbly", "Bubbly (on phone)"], ["Kawaii", "Kawaii: extra high (on phone)"], ["Heart", "Heart: natural English (on phone)"],
+	["Leda", "Leda (online)"], ["Aoede", "Aoede (online)"], ["Zephyr", "Zephyr (online)"], ["Laomedeia", "Laomedeia (online)"], ["Despina", "Despina (online)"], ["Kore", "Kore (online)"]]
+const LOCAL_VOICES := ["Miku", "Sweet", "Bubbly", "Kawaii", "Heart"]   # made on the phone itself: offline, no limits
+var local_id := 0          # which on-device speech is current
+var vs_local := false      # the current voice stream comes from the phone, not the server
 var voice_player: AudioStreamPlayer
 var speak_http: HTTPRequest
 var speak_cps := CHARS_PER_SEC        # how fast the current speech moves through the text (for lip-sync)
@@ -350,7 +355,58 @@ func speak_reply(text: String) -> void:
 	if not settings.voice_on:
 		_silent_reply(text)
 		return
+	if settings.voice in LOCAL_VOICES and live != null and str(live.voiceStatus()) in ["ready", "loading"]:
+		local_voice(text)
+		return
 	stream_voice(text)
+
+
+## Her on-device voice: the phone makes it piece by piece and we play each piece as it arrives.
+func local_voice(text: String) -> void:
+	stop_voice_stream()
+	local_id += 1
+	vs_text = text
+	vs_local = true
+	vs_reading_done = false
+	vs_pending.clear()
+	vs_env.clear()
+	vs_pushed = 0
+	vs_active = true
+	vs_started_at = Time.get_ticks_msec() / 1000.0
+	vs_deadline = vs_started_at + 25.0      # the very first time, the voice model also has to load
+	if not live.speakLocal(local_id, text, settings.voice):
+		vs_local = false
+		stream_voice(text)
+
+
+func _on_local_start(id: int, rate: int) -> void:
+	if id == local_id and vs_local:
+		vs_rate = rate
+
+
+func _on_local_audio(id: int, pcm: PackedByteArray) -> void:
+	if id == local_id and vs_local and vs_active:
+		vs_pending.append_array(pcm)
+		_feed_voice()
+
+
+func _on_local_done(id: int) -> void:
+	if id == local_id and vs_local:
+		vs_reading_done = true
+		if vs_playback == null and vs_pending.size() < 2:
+			_voice_fail("on-device voice made no sound")
+
+
+func _on_local_failed(id: int, why: String) -> void:
+	if id != local_id or not vs_local:
+		return
+	last_problem = "on-device voice: " + why
+	if vs_playback == null:
+		var text := vs_text
+		stop_voice_stream()
+		stream_voice(text)       # fall back to her online voice
+	else:
+		vs_reading_done = true
 
 
 # --------------------------------------------- streamed natural voice --
@@ -392,7 +448,8 @@ func stream_voice(text: String) -> void:
 		_silent_reply(text)
 		return
 	vs_text = text
-	vs_body = JSON.stringify({"text": text, "voice": settings.voice, "stream": true})
+	vs_local = false
+	vs_body = JSON.stringify({"text": text, "voice": "Leda" if settings.voice in LOCAL_VOICES else settings.voice, "stream": true})
 	vs_requested = false
 	vs_reading_done = false
 	vs_got_body = false
@@ -406,6 +463,9 @@ func stream_voice(text: String) -> void:
 
 func stop_voice_stream() -> void:
 	vs_active = false
+	if vs_local and live != null:
+		live.stopLocal(local_id)
+	vs_local = false
 	if vs_client:
 		vs_client.close()
 		vs_client = null
@@ -426,6 +486,14 @@ func _voice_fail(why: String) -> void:
 
 
 func poll_voice_stream() -> void:
+	if vs_active and vs_local:
+		if vs_playback == null and Time.get_ticks_msec() / 1000.0 > vs_deadline:
+			var text := vs_text
+			stop_voice_stream()
+			stream_voice(text)
+			return
+		_feed_voice()
+		return
 	if not vs_active or vs_client == null:
 		return
 	var now := Time.get_ticks_msec() / 1000.0
@@ -483,7 +551,7 @@ func _feed_voice() -> void:
 		speak_start = Time.get_ticks_msec() / 1000.0
 		speak_idx = 0
 		speaking = true
-		voice_status = "natural (%s), started after %.1f s" % [settings.voice, speak_start - vs_started_at]
+		voice_status = "%s (%s), started after %.1f s" % ["on phone" if vs_local else "online", settings.voice if vs_local or not settings.voice in LOCAL_VOICES else "Leda", speak_start - vs_started_at]
 	if vs_playback == null:
 		return
 	var frames := mini(vs_pending.size() / 2, vs_playback.get_frames_available())
@@ -925,6 +993,11 @@ func setup_live(singleton: Object = null) -> void:
 	live.connect("live_error", _on_live_error)
 	live.connect("screen_share", _on_screen_share)
 	live.connect("permissions_done", _on_permissions_done)
+	live.connect("local_start", _on_local_start)
+	live.connect("local_audio", _on_local_audio)
+	live.connect("local_done", _on_local_done)
+	live.connect("local_failed", _on_local_failed)
+	live.prepareVoice()
 	var crash: String = live.takeLastCrash()
 	if crash != "":
 		last_problem = "the app crashed last time: " + crash.get_slice("\n", 0).left(220)
@@ -1035,6 +1108,8 @@ func diagnostics() -> String:
 	var bars := int(round(live_level * 10.0))
 	lines.append("Mic level: " + "|".repeat(bars) + ".".repeat(10 - bars) + ("  (talk to test)" if on else "  (start Live to test)"))
 	lines.append("Voice: " + ("off" if not settings.voice_on else settings.voice + ", last: " + voice_status))
+	if live != null:
+		lines.append("On-phone voice: " + str(live.voiceStatus()))
 	lines.append("Last problem: " + last_problem)
 	if live != null:
 		var lg: String = live.getLog()
@@ -1104,20 +1179,22 @@ func _notification(what: int) -> void:
 
 # ---------------------------------------------------------------- storage --
 func _fix_old_voice() -> void:
-	# the phone voice was removed; anyone who picked it gets Leda
+	# the old phone voice was removed; unknown choices get Miku
 	var known := false
 	for v in VOICES:
 		if v[0] == settings.get("voice", ""):
 			known = true
 	if not known:
-		settings.voice = "Leda"
+		settings.voice = "Miku"
 
 
 func load_state() -> void:
 	if not FileAccess.file_exists(STATE_PATH):
 		return
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(STATE_PATH))
+	var from_before_v11 := false
 	if parsed is Dictionary:
+		from_before_v11 = not parsed.get("settings", {}).has("voice_v11")
 		for k in parsed.get("settings", {}):
 			settings[k] = parsed.settings[k]
 		for h in parsed.get("history", []):
@@ -1126,6 +1203,9 @@ func load_state() -> void:
 		for m in parsed.get("memories", []):
 			if m is String:
 				memories.append(m)
+	if from_before_v11:
+		settings.voice = "Miku"      # v11: everyone starts on her new on-phone voice once
+		settings.voice_v11 = true
 	_fix_old_voice()
 
 
@@ -1448,7 +1528,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v10 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v11 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:

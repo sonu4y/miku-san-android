@@ -6,3 +6,6 @@ android/.build_version
 android-plugin/.gradle/
 android-plugin/**/build/
 addons/miku-live.aar
+addons/sherpa-onnx.aar
+android-plugin/miku-live/libs/
+android-plugin/miku-live/src/main/assets/kokoro/

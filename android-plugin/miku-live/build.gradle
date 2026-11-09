@@ -17,4 +17,6 @@ android {
 dependencies {
     // Provided by the Godot app at runtime; only needed to compile the plugin.
     compileOnly "org.godotengine:godot:4.4.1.stable"
+    // On-device voice engine (sherpa-onnx). The full AAR ships next to this plugin in addons/.
+    compileOnly files("libs/sherpa-onnx-classes.jar")
 }
