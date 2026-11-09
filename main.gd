@@ -90,6 +90,9 @@ var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
 var seen_replies: Array = []          # avoids double-handling turns from the background
+var last_problem := "none"
+var diag_lbl: Label
+var server_check_http: HTTPRequest
 
 # UI
 var ui: Control
@@ -219,6 +222,8 @@ func _process(delta: float) -> void:
 	if mic_on:
 		listen(delta)
 	follow_keyboard(delta)
+	if diag_lbl and is_instance_valid(diag_lbl):
+		diag_lbl.text = diagnostics()
 	if level_bar and level_bar.visible:
 		var target_w := 8.0 + 110.0 * live_level
 		level_bar.custom_minimum_size.x = lerpf(level_bar.custom_minimum_size.x, target_w, minf(1.0, delta * 20.0))
@@ -663,6 +668,9 @@ func _on_heard(result: int, code: int, _headers: PackedStringArray, body: Packed
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200 or not parsed is Dictionary:
 		var err: String = parsed.get("error", "server") if parsed is Dictionary else "offline"
+		if code == 404:
+			err = "server_old"
+		last_problem = "%s (%s, HTTP %d)" % [error_text(err), err, code]
 		status_lbl.text = error_text(err)
 		return
 	var heard: String = str(parsed.get("heard", "")).strip_edges()
@@ -690,27 +698,37 @@ func error_text(code: String) -> String:
 		"ai_rate_limited": "My brain's busy right now. Try again in a minute.",
 		"offline": "I can't reach the internet right now.",
 		"mic_unavailable": "Couldn't open the microphone. Is another app using it?",
+		"server_old": "The Miku server needs updating (redeploy v4 on Vercel).",
 	}.get(code, "Something went wrong. Keep talking and I'll try again.")
 
 
 # ------------------------------------------------------------- live mode --
-func setup_live() -> void:
-	if not Engine.has_singleton("MikuLive"):
-		return
-	live = Engine.get_singleton("MikuLive")
-	live.live_state.connect(_on_live_state)
-	live.live_level.connect(func(v): live_level = v)
-	live.live_heard.connect(_on_live_heard)
-	live.live_reply.connect(_on_live_reply)
-	live.live_speak_start.connect(_on_live_speak_start)
-	live.live_speak_progress.connect(func(pos): speak_idx = pos)
-	live.live_speak_done.connect(func(): speaking = false)
-	live.live_error.connect(func(code): status_lbl.text = error_text(code))
-	live.screen_share.connect(_on_screen_share)
-	live.permissions_done.connect(_on_permissions_done)
+func setup_live(singleton: Object = null) -> void:
+	if singleton == null:
+		if not Engine.has_singleton("MikuLive"):
+			return
+		singleton = Engine.get_singleton("MikuLive")
+	live = singleton
+	# The plugin's signals are added at runtime, so they must be connected by name
+	# (live.some_signal.connect() only works for signals Godot knows in advance).
+	live.connect("live_state", _on_live_state)
+	live.connect("live_level", func(v): live_level = float(v))
+	live.connect("live_heard", _on_live_heard)
+	live.connect("live_reply", _on_live_reply)
+	live.connect("live_speak_start", _on_live_speak_start)
+	live.connect("live_speak_progress", func(pos): speak_idx = int(pos))
+	live.connect("live_speak_done", func(): speaking = false)
+	live.connect("live_error", _on_live_error)
+	live.connect("screen_share", _on_screen_share)
+	live.connect("permissions_done", _on_permissions_done)
 	if live.isLive():
 		_set_live_ui(true)
 		live.updateContext(live_config())
+
+
+func _on_live_error(code: String) -> void:
+	last_problem = "%s (%s)" % [error_text(code), code]
+	status_lbl.text = error_text(code)
 
 
 func live_config() -> String:
@@ -793,6 +811,47 @@ func _on_live_speak_start(text: String) -> void:
 	speak_start = Time.get_ticks_msec() / 1000.0
 	speak_idx = 0
 	speaking = true
+
+
+func diagnostics() -> String:
+	var lines := []
+	lines.append("Live engine: " + ("found" if live != null else "missing (using the basic mic)"))
+	var perm := false
+	if live != null:
+		perm = live.hasMicPermission()
+	else:
+		perm = OS.get_name() != "Android" or "android.permission.RECORD_AUDIO" in OS.get_granted_permissions()
+	lines.append("Microphone permission: " + ("allowed" if perm else "NOT allowed"))
+	var on := live_on or mic_on
+	lines.append("Live: " + ("on, " + (live_state if live_state != "" else "starting") if on else "off"))
+	var bars := int(round(live_level * 10.0))
+	lines.append("Mic level: " + "|".repeat(bars) + ".".repeat(10 - bars) + ("  (talk to test)" if on else "  (start Live to test)"))
+	lines.append("Last problem: " + last_problem)
+	return "\n".join(lines)
+
+
+func check_server() -> void:
+	# sends a tiny silent clip to /api/talk; a working server answers 200
+	if server_check_http == null:
+		server_check_http = HTTPRequest.new()
+		server_check_http.timeout = 30
+		add_child(server_check_http)
+		server_check_http.request_completed.connect(func(result, code, _h, body):
+			if result != HTTPRequest.RESULT_SUCCESS:
+				last_problem = "Server check: no internet connection"
+			elif code == 200:
+				last_problem = "none (server check passed)"
+			elif code == 404:
+				last_problem = error_text("server_old") + " (HTTP 404)"
+			else:
+				var p = JSON.parse_string(body.get_string_from_utf8())
+				var e: String = p.get("error", "?") if p is Dictionary else "?"
+				last_problem = "Server check failed: HTTP %d %s" % [code, e])
+	var silent := PackedVector2Array()
+	silent.resize(int(AudioServer.get_mix_rate() * 0.3))
+	last_problem = "checking server..."
+	server_check_http.request(SERVER + "/api/talk", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST,
+		JSON.stringify({"system": "Mic check.", "messages": [], "audio": Marshalls.raw_to_base64(make_wav(silent))}))
 
 
 func toggle_screen() -> void:
@@ -1108,6 +1167,17 @@ func open_settings() -> void:
 	var ml := label(mem.strip_edges() if mem != "" else "Nothing yet. Tell her about yourself.", 17, MIST)
 	ml.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	col.add_child(ml)
+
+	col.add_child(label("MIC CHECK", 15, MIST))
+	diag_lbl = label(diagnostics(), 16, INK)
+	diag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(diag_lbl)
+	var dr := HBoxContainer.new()
+	dr.add_theme_constant_override("separation", 10)
+	dr.add_child(make_button("Test server", check_server))
+	if live != null:
+		dr.add_child(make_button("Allow mic", func(): live.requestPermissions()))
+	col.add_child(dr)
 
 	var gap := Control.new()
 	gap.custom_minimum_size.y = 10
