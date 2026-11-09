@@ -1048,7 +1048,8 @@ func _selftest(kind: String) -> void:
 		print("SELFTEST live on: ", live_on, " state: ", live_state)
 		live.liveTestSay("Yay, live mode works! I can talk to you hands free now.")
 		await get_tree().create_timer(15.0).timeout
-	print("SELFTEST log:\n", live.getLog())
+	for line in str(live.getLog()).split("\n"):
+		print("SELFTEST | ", line)
 	print("SELFTEST done")
 
 
