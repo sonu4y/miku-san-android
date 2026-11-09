@@ -14,5 +14,5 @@ for i in $(seq 1 120); do
 done
 adb logcat -d > logcat.txt
 echo "===== self-test output ====="
-grep -E "SELFTEST|Voice piece|On-phone voice|on-phone voice|godot.*(ERROR|SCRIPT)|AndroidRuntime|FATAL|sherpa|mikulive|AudioTrack.*(error|Error)" logcat.txt | head -150
+grep -E " godot |MikuLive|AndroidRuntime|FATAL|sherpa|AudioTrack" logcat.txt | grep -v "ShaderGLES3\|Method/function failed\|p_size < 0" | cut -c1-300 | head -200
 grep -q "SELFTEST done" logcat.txt

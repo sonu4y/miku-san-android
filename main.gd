@@ -1003,7 +1003,7 @@ func setup_live(singleton: Object = null) -> void:
 	live.connect("local_done", _on_local_done)
 	live.connect("local_failed", _on_local_failed)
 	live.prepareVoice()
-	if live.has_method("getLaunchExtra") and str(live.getLaunchExtra()) != "":
+	if str(live.getLaunchExtra()) != "":
 		_selftest(str(live.getLaunchExtra()))
 	var crash: String = live.takeLastCrash()
 	if crash != "":
