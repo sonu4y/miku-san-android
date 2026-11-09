@@ -13,6 +13,7 @@ const DEFAULTS := {
 	"user_name": "friend",
 	"persona": "Warm, playful and curious. Teases gently, laughs easily, and genuinely wants to hear about my day. Honest with me even when it isn't what I want to hear. Talks casually like a close friend, and is happy to mix in a little Telugu or Hindi when I do.",
 	"voice_on": true,
+	"voice": "Leda",
 }
 
 # colours
@@ -89,6 +90,12 @@ var sharing := false
 var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
+const VOICES := [["Leda", "Leda: youthful"], ["Aoede", "Aoede: breezy"], ["Zephyr", "Zephyr: bright"], ["Laomedeia", "Laomedeia: upbeat"], ["Despina", "Despina: smooth"], ["Kore", "Kore: firm"], ["phone", "Phone's own voice"]]
+var voice_player: AudioStreamPlayer
+var speak_http: HTTPRequest
+var speak_cps := CHARS_PER_SEC        # how fast the current speech moves through the text (for lip-sync)
+var pending_speech := ""              # reply waiting for its natural voice
+var voice_status := "not used yet"
 var seen_replies: Array = []          # avoids double-handling turns from the background
 var last_problem := "none"
 var diag_lbl: Label
@@ -358,6 +365,66 @@ func _on_tts_ended() -> void:
 	speaking = false
 
 
+## Speak a whole reply: her natural voice from the server, or the phone's voice as a fallback.
+func speak_reply(text: String) -> void:
+	if text.strip_edges() == "":
+		return
+	if not settings.voice_on or settings.get("voice", "Leda") == "phone":
+		_say_with_phone(text)
+		return
+	if speak_http == null:
+		speak_http = HTTPRequest.new()
+		speak_http.timeout = 30
+		add_child(speak_http)
+		speak_http.request_completed.connect(_on_speech)
+	speak_http.cancel_request()
+	pending_speech = text
+	var body := JSON.stringify({"text": text, "voice": settings.voice})
+	if speak_http.request(SERVER + "/api/speak", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body) != OK:
+		_say_with_phone(text)
+
+
+func _on_speech(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	var text := pending_speech
+	pending_speech = ""
+	if text == "":
+		return
+	var parsed = JSON.parse_string(body.get_string_from_utf8()) if result == HTTPRequest.RESULT_SUCCESS else null
+	if code == 200 and parsed is Dictionary and str(parsed.get("audio", "")) != "":
+		play_voice(Marshalls.base64_to_raw(parsed.audio), int(parsed.get("rate", 24000)), text)
+		voice_status = "natural (" + str(parsed.get("voice", settings.voice)) + ")"
+	else:
+		voice_status = "phone voice (natural voice unavailable: HTTP %d)" % code
+		_say_with_phone(text)
+
+
+## Play 16-bit mono PCM from the server and move her mouth along with it.
+func play_voice(pcm: PackedByteArray, rate: int, text: String) -> void:
+	if voice_player == null:
+		voice_player = AudioStreamPlayer.new()
+		add_child(voice_player)
+		voice_player.finished.connect(func(): speaking = false)
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	wav.data = pcm
+	voice_player.stream = wav
+	var seconds := pcm.size() / 2.0 / float(rate)
+	speaking_text = text
+	speak_cps = text.length() / maxf(0.3, seconds)
+	speak_start = Time.get_ticks_msec() / 1000.0
+	speak_idx = 0
+	speaking = true
+	voice_player.play()
+
+
+func _say_with_phone(text: String) -> void:
+	speak_cps = CHARS_PER_SEC
+	for p in RegEx.create_from_string("[^.!?…]+[.!?…]*").search_all(text):
+		say(p.get_string())
+
+
 func say(sentence: String) -> void:
 	sentence = sentence.strip_edges()
 	if sentence == "":
@@ -387,6 +454,9 @@ func pump_speech() -> void:
 func stop_speaking() -> void:
 	speak_queue.clear()
 	DisplayServer.tts_stop()
+	pending_speech = ""
+	if voice_player:
+		voice_player.stop()
 	speaking = false
 	flap_until = 0.0
 
@@ -397,7 +467,7 @@ func viseme() -> Dictionary:
 	var i := 0
 	if speaking:
 		text = speaking_text
-		i = maxi(speak_idx, int((now - speak_start) * CHARS_PER_SEC))
+		i = maxi(speak_idx, int((now - speak_start) * speak_cps))
 	elif now < flap_until:
 		text = flap_text
 		i = int((now - flap_start) * CHARS_PER_SEC)
@@ -488,9 +558,7 @@ func apply_reply(raw: String, speak_it: bool) -> void:
 	if c.mood != "":
 		set_mood(c.mood, 0.75, 8)
 	if speak_it:
-		var parts := RegEx.create_from_string("[^.!?…]+[.!?…]*").search_all(c.text)
-		for p in parts:
-			say(p.get_string())
+		speak_reply(c.text)
 	history.append({"role": "assistant", "content": raw})
 	for f in c.remember:
 		if not f in memories:
@@ -656,7 +724,10 @@ func transcribe(frames: PackedVector2Array) -> void:
 	transcribing = true
 	status_lbl.text = "Thinking..."
 	set_mood("neutral")
-	var body := JSON.stringify({"system": rules(), "messages": recent_messages(), "audio": Marshalls.raw_to_base64(make_wav(frames))})
+	var req := {"system": rules(), "messages": recent_messages(), "audio": Marshalls.raw_to_base64(make_wav(frames))}
+	if settings.voice_on and settings.voice != "phone":
+		req["voice"] = settings.voice
+	var body := JSON.stringify(req)
 	var err := hear_http.request(SERVER + "/api/talk", ["Content-Type: application/json", "Origin: " + SERVER, "Referer: " + SERVER + "/"], HTTPClient.METHOD_POST, body)
 	if err != OK:
 		push_warning("talk request failed: %s" % err)
@@ -680,7 +751,12 @@ func _on_heard(result: int, code: int, _headers: PackedStringArray, body: Packed
 		return
 	history.append({"role": "user", "content": heard})
 	show_you(heard)
-	apply_reply(reply, true)
+	if str(parsed.get("audio", "")) != "":
+		apply_reply(reply, false)
+		play_voice(Marshalls.base64_to_raw(parsed.audio), int(parsed.get("rate", 24000)), clean_reply(reply).text)
+		voice_status = "natural (" + str(parsed.get("voice", settings.voice)) + ")"
+	else:
+		apply_reply(reply, true)
 
 
 func recent_messages() -> Array:
@@ -721,6 +797,9 @@ func setup_live(singleton: Object = null) -> void:
 	live.connect("live_error", _on_live_error)
 	live.connect("screen_share", _on_screen_share)
 	live.connect("permissions_done", _on_permissions_done)
+	var crash: String = live.takeLastCrash()
+	if crash != "":
+		last_problem = "the app crashed last time: " + crash.get_slice("\n", 0).left(220)
 	if live.isLive():
 		_set_live_ui(true)
 		live.updateContext(live_config())
@@ -732,7 +811,7 @@ func _on_live_error(code: String) -> void:
 
 
 func live_config() -> String:
-	return JSON.stringify({"server": SERVER, "system": rules(), "messages": recent_messages(), "voice_on": settings.voice_on})
+	return JSON.stringify({"server": SERVER, "system": rules(), "messages": recent_messages(), "voice_on": settings.voice_on, "voice": settings.voice})
 
 
 func toggle_live() -> void:
@@ -807,6 +886,7 @@ func _on_live_reply(raw: String) -> void:
 
 
 func _on_live_speak_start(text: String) -> void:
+	speak_cps = CHARS_PER_SEC
 	speaking_text = text
 	speak_start = Time.get_ticks_msec() / 1000.0
 	speak_idx = 0
@@ -826,7 +906,12 @@ func diagnostics() -> String:
 	lines.append("Live: " + ("on, " + (live_state if live_state != "" else "starting") if on else "off"))
 	var bars := int(round(live_level * 10.0))
 	lines.append("Mic level: " + "|".repeat(bars) + ".".repeat(10 - bars) + ("  (talk to test)" if on else "  (start Live to test)"))
+	lines.append("Voice: " + ("off" if not settings.voice_on else ("phone voice" if settings.voice == "phone" else settings.voice + ", last: " + voice_status)))
 	lines.append("Last problem: " + last_problem)
+	if live != null:
+		var lg: String = live.getLog()
+		if lg != "":
+			lines.append("Live log:\n" + lg)
 	return "\n".join(lines)
 
 
@@ -1132,11 +1217,16 @@ func open_settings() -> void:
 	settings_layer.add_child(m)
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", box(PANEL, 26, Vector4(26, 24, 26, 24)))
-	panel.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	panel.size_flags_vertical = Control.SIZE_FILL
 	m.add_child(panel)
+	# scrolls when it's taller than the screen
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 8)
-	panel.add_child(col)
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(col)
 	col.add_child(label("Settings", 34, INK))
 
 	var fields := {}
@@ -1159,6 +1249,27 @@ func open_settings() -> void:
 		e.add_theme_stylebox_override("focus", box(FIELD.lightened(0.06), 14, Vector4(14, 10, 14, 10)))
 		fields[item[0]] = e
 		col.add_child(e)
+
+	col.add_child(label("HER VOICE", 15, MIST))
+	var vrow := HBoxContainer.new()
+	vrow.add_theme_constant_override("separation", 10)
+	var vpick := OptionButton.new()
+	vpick.add_theme_font_size_override("font_size", 20)
+	vpick.add_theme_stylebox_override("normal", box(FIELD, 14, Vector4(14, 10, 14, 10)))
+	vpick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for i in VOICES.size():
+		vpick.add_item(VOICES[i][1], i)
+		if VOICES[i][0] == settings.get("voice", "Leda"):
+			vpick.select(i)
+	vrow.add_child(vpick)
+	vrow.add_child(make_button("Hear it", func():
+		var keep: String = settings.voice
+		settings.voice = VOICES[vpick.selected][0]
+		stop_speaking()
+		speak_reply("Hi %s! This is how I sound." % settings.user_name)
+		settings.voice = keep))
+	col.add_child(vrow)
+	fields["voice"] = vpick
 
 	col.add_child(label("WHAT SHE REMEMBERS", 15, MIST))
 	var mem := ""
@@ -1186,9 +1297,14 @@ func open_settings() -> void:
 	r1.add_theme_constant_override("separation", 10)
 	r1.add_child(make_button("Save", func():
 		for k in fields:
+			if k == "voice":
+				settings.voice = VOICES[fields[k].selected][0]
+				continue
 			var v: String = fields[k].text.strip_edges()
 			if v != "":
 				settings[k] = v
+		if live_on:
+			live.updateContext(live_config())
 		title_lbl.text = settings.name
 		save_state()
 		open_settings(), CANDLE, DARK_INK))

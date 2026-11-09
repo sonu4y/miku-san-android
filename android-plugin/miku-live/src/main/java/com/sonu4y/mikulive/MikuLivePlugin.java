@@ -32,6 +32,53 @@ public class MikuLivePlugin extends GodotPlugin {
     public MikuLivePlugin(Godot godot) {
         super(godot);
         instance = this;
+        installCrashRecorder();
+    }
+
+    /** Saves the reason for a crash so the app can show it in Mic check next time. */
+    private void installCrashRecorder() {
+        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                Activity a = getActivity();
+                if (a != null) {
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    error.printStackTrace(new java.io.PrintWriter(sw));
+                    String text = sw.toString();
+                    if (text.length() > 1500) text = text.substring(0, 1500);
+                    java.io.File f = new java.io.File(a.getFilesDir(), "miku_crash.txt");
+                    try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) { o.write(text.getBytes("UTF-8")); }
+                }
+            } catch (Throwable ignored) {
+            }
+            if (previous != null) previous.uncaughtException(thread, error);
+        });
+    }
+
+    /** The last crash report (empty if none); clears it. */
+    @UsedByGodot
+    public String takeLastCrash() {
+        Activity a = getActivity();
+        if (a == null) return "";
+        java.io.File f = new java.io.File(a.getFilesDir(), "miku_crash.txt");
+        if (!f.exists()) return "";
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            }
+            f.delete();
+            return out.toString("UTF-8");
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    @UsedByGodot
+    public String getLog() {
+        return LiveService.getLog();
     }
 
     @Override
@@ -114,7 +161,12 @@ public class MikuLivePlugin extends GodotPlugin {
         Context c = ctx();
         if (c == null) return;
         Intent i = new Intent(c, LiveService.class).setAction(LiveService.ACTION_START).putExtra("config", configJson);
-        if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
+        } catch (Throwable e) {
+            LiveService.log("Couldn't start live: " + e);
+            emit("live_error", "service_failed");
+        }
     }
 
     @UsedByGodot

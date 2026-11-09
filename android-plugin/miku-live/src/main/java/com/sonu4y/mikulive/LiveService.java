@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
+import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.media.audiofx.AcousticEchoCanceler;
 import android.media.audiofx.AutomaticGainControl;
@@ -57,6 +58,20 @@ public class LiveService extends Service {
     static volatile LiveService instance;
     private static final JSONArray pendingTurns = new JSONArray();
 
+    // a short log of what live mode did, shown in the app's Mic check
+    private static final ArrayDeque<String> log = new ArrayDeque<>();
+    static void log(String msg) {
+        String line = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(new java.util.Date()) + "  " + msg;
+        Log.i(TAG, msg);
+        synchronized (log) {
+            log.addLast(line);
+            while (log.size() > 14) log.removeFirst();
+        }
+    }
+    static String getLog() {
+        synchronized (log) { return android.text.TextUtils.join("\n", log); }
+    }
+
     // audio
     static final int RATE = 16000;
     static final int FRAME = 320;                // 20 ms
@@ -80,6 +95,8 @@ public class LiveService extends Service {
     private volatile String system = "";
     private final JSONArray history = new JSONArray();
     private volatile boolean voiceOn = true;
+    private volatile String voiceName = "Leda";
+    private volatile AudioTrack track;
 
     private TextToSpeech tts;
     private volatile boolean ttsReady = false;
@@ -136,8 +153,14 @@ public class LiveService extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_START.equals(action)) {
+            log("Live starting");
             updateConfig(intent.getStringExtra("config"));
-            goForeground(screen.isActive());
+            try {
+                goForeground(screen.isActive());
+            } catch (Throwable e) {
+                log("Couldn't start in the background: " + e);
+                MikuLivePlugin.emit("live_error", "service_failed");
+            }
             if (!running) startListening();
         }
         return START_NOT_STICKY;
@@ -167,6 +190,7 @@ public class LiveService extends Service {
             if (c.has("server")) server = c.getString("server");
             if (c.has("system")) system = c.getString("system");
             if (c.has("voice_on")) voiceOn = c.getBoolean("voice_on");
+            if (c.has("voice")) voiceName = c.getString("voice");
             if (c.has("messages")) {
                 JSONArray m = c.getJSONArray("messages");
                 synchronized (history) {
@@ -201,7 +225,9 @@ public class LiveService extends Service {
     }
 
     private void stopEverything() {
+        if (running) log("Live stopped");
         running = false;
+        stopTrack();
         if (audioThread != null) audioThread.interrupt();
         if (tts != null) tts.stop();
         if (screen != null) screen.stop();
@@ -253,7 +279,7 @@ public class LiveService extends Service {
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
         b.setContentTitle("Miku-san is live")
                 .setContentText(text)
-                .setSmallIcon(getApplicationInfo().icon)
+                .setSmallIcon(android.R.drawable.presence_audio_online)
                 .setContentIntent(openPi)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "Stop", stopPi).build());
@@ -286,11 +312,13 @@ public class LiveService extends Service {
             recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, RATE,
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, FRAME * 2 * 20));
         } catch (Exception e) {
+            log("Mic failed: " + e);
             MikuLivePlugin.emit("live_error", "mic_unavailable");
             stopEverything();
             return;
         }
         if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+            log("Mic failed: not initialized (another app using it?)");
             MikuLivePlugin.emit("live_error", "mic_unavailable");
             stopEverything();
             return;
@@ -299,6 +327,7 @@ public class LiveService extends Service {
         try { if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(session).setEnabled(true); } catch (Exception ignored) { }
         try { if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(session).setEnabled(true); } catch (Exception ignored) { }
         try { if (AutomaticGainControl.isAvailable()) AutomaticGainControl.create(session).setEnabled(true); } catch (Exception ignored) { }
+        log("Mic open (echo cancel " + (AcousticEchoCanceler.isAvailable() ? "on" : "n/a") + ", noise filter " + (NoiseSuppressor.isAvailable() ? "on" : "n/a") + ")");
 
         running = true;
         setState(State.LISTENING);
@@ -379,9 +408,11 @@ public class LiveService extends Service {
                     capturing = false;
                     if (voiced >= MIN_VOICED_FRAMES) {
                         byte[] pcm = turn.toByteArray();
+                        log(String.format(Locale.US, "Heard %.1f s of speech, sending", pcm.length / 2.0 / RATE));
                         setState(State.THINKING);
                         net.execute(() -> sendTurn(pcm));
                     } else {
+                        log("Ignored a short noise");
                         setState(State.LISTENING);
                     }
                     turn.reset();
@@ -424,6 +455,8 @@ public class LiveService extends Service {
             body.put("audio", Base64.encodeToString(wav(pcm), Base64.NO_WRAP));
             String shot = screen.isActive() ? screen.grabJpegBase64() : null;
             if (shot != null) body.put("image", shot);
+            if (voiceOn && !"phone".equals(voiceName)) body.put("voice", voiceName);
+            long t0 = System.currentTimeMillis();
 
             HttpURLConnection c = (HttpURLConnection) new URL(server + "/api/talk").openConnection();
             c.setRequestMethod("POST");
@@ -437,10 +470,12 @@ public class LiveService extends Service {
             int code = c.getResponseCode();
             String resp = read(code >= 400 ? c.getErrorStream() : c.getInputStream());
             c.disconnect();
+            log("Server answered " + code + " in " + (System.currentTimeMillis() - t0) + " ms");
             if (!running) return;
             if (code != 200) {
-                String err = "server";
+                String err = code == 404 ? "server_old" : "server";
                 try { err = new JSONObject(resp).optString("error", err); } catch (Exception ignored) { }
+                log("Problem: " + err);
                 MikuLivePlugin.emit("live_error", err);
                 pauseThenListen(1500);
                 return;
@@ -449,6 +484,7 @@ public class LiveService extends Service {
             String heard = r.optString("heard", "").trim();
             String reply = r.optString("reply", "").trim();
             if (heard.isEmpty() || reply.isEmpty()) {
+                log("No clear words in that clip");
                 setState(State.LISTENING);
                 return;
             }
@@ -464,9 +500,17 @@ public class LiveService extends Service {
                 MikuLivePlugin.emit("live_heard", heard);
                 MikuLivePlugin.emit("live_reply", reply);
             }
-            speak(spokenText(reply));
+            String audio = r.optString("audio", "");
+            if (!audio.isEmpty()) {
+                log("Speaking with natural voice (" + r.optString("voice", voiceName) + ")");
+                playPcm(Base64.decode(audio, Base64.DEFAULT), r.optInt("rate", 24000), spokenText(reply));
+            } else {
+                if (voiceOn && !"phone".equals(voiceName)) log("Natural voice unavailable, using phone voice");
+                speak(spokenText(reply));
+            }
         } catch (Exception e) {
             Log.w(TAG, "turn failed", e);
+            log("Turn failed: " + e.getClass().getSimpleName() + " " + e.getMessage());
             if (running) {
                 MikuLivePlugin.emit("live_error", "offline");
                 pauseThenListen(2000);
@@ -510,14 +554,67 @@ public class LiveService extends Service {
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, p, "miku-" + System.currentTimeMillis());
     }
 
+    /** Plays her natural (server-made) voice and reports progress for lip-sync. */
+    private void playPcm(byte[] pcm, int rate, String text) {
+        stopTrack();
+        if (pcm.length < 4) { speak(text); return; }
+        int len = pcm.length & ~1;
+        AudioTrack t;
+        try {
+            t = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(rate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .setBufferSizeInBytes(len)
+                    .build();
+            t.write(pcm, 0, len);
+        } catch (Exception e) {
+            log("Couldn't play natural voice: " + e.getMessage());
+            speak(text);
+            return;
+        }
+        final int frames = len / 2;
+        track = t;
+        setState(State.SPEAKING);
+        MikuLivePlugin.emit("live_speak_start", text);
+        t.play();
+        Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (track != t || state != State.SPEAKING) return;
+                int pos;
+                try { pos = t.getPlaybackHeadPosition(); } catch (Exception e) { pos = frames; }
+                MikuLivePlugin.emit("live_speak_progress", (int) ((long) text.length() * Math.min(pos, frames) / Math.max(1, frames)));
+                if (pos >= frames - rate / 50) finishedSpeaking(); else main.postDelayed(this, 80);
+            }
+        };
+        main.postDelayed(tick, 80);
+    }
+
+    private void stopTrack() {
+        AudioTrack t = track;
+        track = null;
+        if (t != null) {
+            try { t.stop(); } catch (Exception ignored) { }
+            t.release();
+        }
+    }
+
     void interrupt() {
         if (state != State.SPEAKING) return;
         if (tts != null) tts.stop();
+        stopTrack();
+        log("Interrupted by you");
         finishedSpeaking();
     }
 
     private void finishedSpeaking() {
         if (state != State.SPEAKING) return;
+        stopTrack();
         MikuLivePlugin.emit("live_speak_done");
         if (running) setState(State.LISTENING);
     }
