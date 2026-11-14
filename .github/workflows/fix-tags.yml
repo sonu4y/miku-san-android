@@ -1,0 +1,28 @@
+name: Move release tags to cleaned history
+on:
+  push:
+    paths: [".github/workflows/fix-tags.yml"]
+permissions:
+  contents: write
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git push -f origin 19dce1f904a75bb86444d86dcd1a9ef7f6a7c0c1:refs/tags/build-1
+          git push -f origin b98ccddc60feb714454146d68c6bf83148c7f954:refs/tags/v10-build-11
+          git push -f origin 34e0683a843bc1fccd01158835b44e84972aa6cf:refs/tags/v11-build-12
+          git push -f origin 6656a858f05af0cb6c252e6488c40cc25b1af53c:refs/tags/v12-build-19
+          git push -f origin 2633b98e915fbfce4f1d3198fb10f08f7cdd58ed:refs/tags/v2-build-2
+          git push -f origin 16a2e574bb23c3586f33484af73eefe0e7161e50:refs/tags/v2-build-3
+          git push -f origin 22a1da716207fdabb640bffd24c5e98dc46b9ea7:refs/tags/v3-build-4
+          git push -f origin c9aae1f82058f69bda646395b3839e7860e5ce65:refs/tags/v4-build-5
+          git push -f origin 70a8927d259e62c13e0efad1c723349039d62149:refs/tags/v5-build-6
+          git push -f origin 686e860161155d0b655e1c19eec4525870f32b6b:refs/tags/v6-build-7
+          git push -f origin 46a3bd94445f238100a88bd2222f0a935cd64c05:refs/tags/v7-build-8
+          git push -f origin 569701565f283ba10e0d7fd75ae16e8bd6084ba3:refs/tags/v8-build-9
+          git push -f origin 0c386211c34a2b10806cc7f44780e340560bd8f2:refs/tags/v9-build-10
+          git ls-remote --tags origin
