@@ -4,8 +4,9 @@ A native 3D AI friend for Android, made with Godot (no HTML). She stands on your
 
 ## Inspiration
 
-Miku-san was inspired by **JustRayen** on YouTube, whose AI companion project Riko showed what a character-based AI friend can feel like. Go check out his work:
+Miku-san was inspired by **JustRayen** on [YouTube](https://www.youtube.com/@JustRayen), whose AI companion project Riko showed what a character-based AI friend can feel like. Go check out his work:
 
+- YouTube: [youtube.com/@JustRayen](https://www.youtube.com/@JustRayen)
 - Twitch: [twitch.tv/justrayen_ch](https://www.twitch.tv/justrayen_ch)
 - Patreon: [patreon.com/c/RayenAI](https://www.patreon.com/c/RayenAI)
 - Discord: [discord.gg/3vpgUZncsH](https://discord.gg/3vpgUZncsH)
