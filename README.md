@@ -2,6 +2,19 @@
 
 A native 3D AI friend for Android, made with Godot (no HTML). She stands on your screen, blinks, breathes, changes expression with her mood, speaks her replies with lip-sync, and listens hands-free through your microphone.
 
+## Inspiration
+
+Miku-san was inspired by **JustRayen** on YouTube, whose AI companion project Riko showed what a character-based AI friend can feel like. Go check out his work:
+
+- Twitch: [twitch.tv/justrayen_ch](https://www.twitch.tv/justrayen_ch)
+- Patreon: [patreon.com/c/RayenAI](https://www.patreon.com/c/RayenAI)
+- Discord: [discord.gg/3vpgUZncsH](https://discord.gg/3vpgUZncsH)
+- Ko-fi: [ko-fi.com/rayenai](https://ko-fi.com/rayenai)
+- Streamlabs: [tip link](https://streamlabs.com/sl_id_93ff3c83-48ee-3cf3-bc2b-1ab9ca69d4e2/tip)
+- GitHub: [github.com/rayenfeng/riko_project](https://github.com/rayenfeng/riko_project)
+- Instagram: [instagram.com/rayennai](https://www.instagram.com/rayennai/)
+- TikTok: [tiktok.com/@justrayen7](https://www.tiktok.com/@justrayen7)
+
 ## Live mode
 
 Tap **Live** to talk hands-free, like Gemini Live or ChatGPT voice:
