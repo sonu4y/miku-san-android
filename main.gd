@@ -1603,7 +1603,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v13 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v14 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:

@@ -316,6 +316,23 @@ final class LocalVoice {
         return merged;
     }
 
+    /** Joins short pieces: the first up to firstMax characters, the rest up to max. */
+    static List<String> joinPieces(List<String> in, int firstMax, int max) {
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String s : in) {
+            int limit = out.isEmpty() ? firstMax : max;
+            if (cur.length() > 0 && cur.length() + 1 + s.length() > limit) {
+                out.add(cur.toString());
+                cur.setLength(0);
+            }
+            if (cur.length() > 0) cur.append(' ');
+            cur.append(s);
+        }
+        if (cur.length() > 0) out.add(cur.toString());
+        return out;
+    }
+
     /** Receives her voice piece by piece (16-bit mono PCM). Return false to stop. */
     interface Sink {
         boolean piece(byte[] pcm);
@@ -327,7 +344,10 @@ final class LocalVoice {
      */
     static void speak(Context ctx, String text, Style st, Sink sink) throws Exception {
         float speed = 1.0f / st.pitch;   // played back faster/higher, so speak slower to keep a normal pace
-        for (String piece : chunks(text)) {
+        List<String> pieces = chunks(text);
+        // the Fish voice re-reads its reference clip on every piece, so fewer, longer pieces are much faster
+        if (st.engine == FISH) pieces = joinPieces(pieces, 90, 200);
+        for (String piece : pieces) {
             long g0 = System.currentTimeMillis();
             GeneratedAudio a = st.engine.generate(ctx, piece, st.sid, speed);
             float[] f = a.getSamples();

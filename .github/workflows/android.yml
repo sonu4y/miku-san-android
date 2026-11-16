@@ -147,7 +147,7 @@ jobs:
       - name: Publish as a release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v13-build-${{ github.run_number }}
-          name: Miku-san v13 APK (build ${{ github.run_number }})
+          tag_name: v14-build-${{ github.run_number }}
+          name: Miku-san v14 APK (build ${{ github.run_number }})
           body: "Her own voice, built with Fish Audio (on the phone, offline). Instant Miku and Sunny voices kept. Download miku-san.apk below and open it on your phone to install (installs over the previous version)."
           files: build/miku-san.apk
