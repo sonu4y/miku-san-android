@@ -1,5 +1,7 @@
 # Miku-san for Android
 
+> **Voice: Built with Fish Audio.** Miku-san's own voice comes from a clip made with [Fish Audio](https://fish.audio).
+
 A native 3D AI friend for Android, made with Godot (no HTML). She stands on your screen, blinks, breathes, changes expression with her mood, speaks her replies with lip-sync, and listens hands-free through your microphone.
 
 ## Inspiration
@@ -25,7 +27,7 @@ Tap **Live** to talk hands-free, like Gemini Live or ChatGPT voice:
 - Live mode keeps running when you switch apps: a notification shows it's on, and a floating Miku bubble sits on top of other apps (tap it to come back, hold it to stop). Allow "Display over other apps" for the bubble.
 - Tap **Share screen** and choose *Entire screen* so she can see what's on your phone while you talk.
 
-Her voice is made on the phone itself (offline, no limits): **Miku** and **Sunny** start talking almost instantly, and the **HD** voices (Miku HD, Sweet, Bubbly, Kawaii, Heart) are more natural but need a stronger phone. Online Gemini voices are also in Settings.
+Her voice is made on the phone itself (offline, no limits). Her default voice is her own, **Built with Fish Audio**: it's copied on the phone from a short clip made with [Fish Audio](https://fish.audio). **Miku** and **Sunny** are lighter voices that start talking almost instantly. Online Gemini voices are also in Settings.
 
 Each voice turn goes to the Miku-san server's `/api/talk` in one round trip (your voice, plus a screenshot when sharing). The live service lives in `android-plugin/` and is built into the APK by the workflow.
 
@@ -52,6 +54,7 @@ The code in this repository is under the [MIT License](LICENSE).
 These parts are **not** covered by it and keep their own terms:
 
 - **`model/miku.vrm`**, "Medievel Blue Hair Full Sleeve" by Poonam Bajaj: under the [VRM Public License 1.0](https://vrm.dev/licenses/1.0/) as set in the model: personal, non-profit use only; credit to the author required; only the author may use it as their avatar; no violent, sexual, political, religious or hateful use. Redistribution and modification are allowed within those terms.
+- **`android-plugin/miku-live/src/main/assets/voice-fish-ref/ref.wav`**: the voice clip, Built with Fish Audio ([fish.audio](https://fish.audio)), under Fish Audio's terms.
 - **`addons/vrm`** and **`addons/Godot-MToon-Shader`**: their own licenses, in their folders.
-- Downloaded during the build and packed into the APK: [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0), the [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) voice model (Apache-2.0) and the Piper `en_US-libritts_r-medium` voice (see its model card). [Godot Engine](https://godotengine.org/license) is MIT.
+- Downloaded during the build and packed into the APK: [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0), the [ZipVoice](https://github.com/k2-fsa/ZipVoice) voice-cloning model with the Vocos vocoder and the Piper `en_US-libritts_r-medium` voice (see its model card). [Godot Engine](https://godotengine.org/license) is MIT.
 

@@ -4,9 +4,10 @@ import android.content.Context;
 import android.content.res.AssetManager;
 
 import com.k2fsa.sherpa.onnx.GeneratedAudio;
+import com.k2fsa.sherpa.onnx.GenerationConfig;
+import com.k2fsa.sherpa.onnx.OfflineTtsZipVoiceModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTts;
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig;
-import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig;
 
@@ -26,9 +27,10 @@ import java.util.regex.Pattern;
  * Two engines:
  *  - FAST: a small Piper (VITS) model. Makes speech many times faster than real time,
  *    so she starts talking almost at once on any phone.
- *  - HD: Kokoro. More natural and the cutest voices, but needs a strong phone.
+ *  - FISH: her own voice, copied from a short clip made with Fish Audio (ZipVoice
+ *    voice cloning). Slower than FAST, so it needs a decent phone.
  *
- * The models ship inside the APK (assets/voice-fast, assets/kokoro) and are
+ * The models ship inside the APK (assets/voice-fast, assets/voice-fish) and are
  * unpacked to app storage once, then loaded from files.
  */
 final class LocalVoice {
@@ -46,12 +48,8 @@ final class LocalVoice {
             // fast voices (default)
             case "Miku":    return new Style(FAST, FAST_MIKU_SID, FAST_MIKU_PITCH);
             case "Sunny":   return new Style(FAST, FAST_SUNNY_SID, FAST_SUNNY_PITCH);
-            // HD voices (Kokoro)
-            case "MikuHD":  return new Style(HD, 40, 1.00f);  // jf_tebukuro: high, anime-girl voice
-            case "Sweet":   return new Style(HD, 38, 1.15f);  // jf_gongitsune
-            case "Bubbly":  return new Style(HD, 39, 1.15f);  // jf_nezumi
-            case "Kawaii":  return new Style(HD, 37, 1.25f);  // jf_alpha, extra high
-            case "Heart":   return new Style(HD, 3, 1.10f);   // af_heart: natural English
+            // her own voice, built with Fish Audio
+            case "Fish":    return new Style(FISH, 0, 1.00f);
             default: return null;                            // not an on-phone voice (a Gemini voice)
         }
     }
@@ -101,16 +99,20 @@ final class LocalVoice {
                     File dir = unpack(ctx, this);
                     long t1 = System.currentTimeMillis();
                     OfflineTtsModelConfig m = new OfflineTtsModelConfig();
-                    if (this == HD) {
-                        OfflineTtsKokoroModelConfig k = new OfflineTtsKokoroModelConfig();
-                        k.setModel(new File(dir, files[0]).getAbsolutePath());
-                        k.setVoices(new File(dir, "voices.bin").getAbsolutePath());
-                        k.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
-                        k.setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath());
-                        k.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
-                        k.setLang("en-us");
-                        k.setLengthScale(1.0f);
-                        m.setKokoro(k);
+                    if (this == FISH) {
+                        OfflineTtsZipVoiceModelConfig z = new OfflineTtsZipVoiceModelConfig();
+                        z.setTokens(new File(dir, "tokens.txt").getAbsolutePath());
+                        z.setEncoder(new File(dir, "encoder.int8.onnx").getAbsolutePath());
+                        z.setDecoder(new File(dir, "decoder.int8.onnx").getAbsolutePath());
+                        z.setVocoder(new File(dir, "vocos_24khz.onnx").getAbsolutePath());
+                        z.setLexicon(new File(dir, "lexicon.txt").getAbsolutePath());
+                        z.setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath());
+                        z.setFeatScale(0.1f);
+                        z.setTShift(0.5f);
+                        z.setTargetRms(0.1f);
+                        z.setGuidanceScale(1.0f);
+                        m.setZipvoice(z);
+                        refAudio = readWav(new File(dir, "ref.wav"));
                     } else {
                         OfflineTtsVitsModelConfig v = new OfflineTtsVitsModelConfig();
                         v.setModel(new File(dir, files[0]).getAbsolutePath());
@@ -128,11 +130,16 @@ final class LocalVoice {
                     c.setMaxNumSentences(1);
                     c.setSilenceScale(0.2f);
                     OfflineTts t = new OfflineTts(null, c);
-                    long t2 = System.currentTimeMillis();
-                    t.generate("Hi.", 0, 1.0f);   // warm up so the first real reply is quick
-                    LiveService.log(name + " voice ready: unpack " + (t1 - t0) + " ms, load " + (t2 - t1) + " ms, warm-up "
-                            + (System.currentTimeMillis() - t2) + " ms, " + m.getNumThreads() + " threads of " + cores);
                     tts = t;
+                    long t2 = System.currentTimeMillis();
+                    // warm up so the first real reply is quick (and see how fast this phone is)
+                    GeneratedAudio w = raw(t, "Hello there, how are you today?", 0, 1.0f);
+                    long warm = System.currentTimeMillis() - t2;
+                    float secs = w.getSamples().length / (float) rate;
+                    if (this == FISH && secs > 0 && warm / 1000f / secs > 0.9f) steps = 2;   // slower phone: fewer steps
+                    LiveService.log(name + " voice ready: unpack " + (t1 - t0) + " ms, load " + (t2 - t1) + " ms, warm-up "
+                            + warm + " ms for " + String.format(Locale.US, "%.1f", secs) + " s, " + m.getNumThreads()
+                            + " threads of " + cores + (this == FISH ? ", steps " + steps : ""));
                     return t;
                 } catch (Throwable e) {
                     failure = name + " voice failed to load: " + e;
@@ -146,20 +153,77 @@ final class LocalVoice {
 
         GeneratedAudio generate(Context ctx, String text, int sid, float speed) throws Exception {
             OfflineTts t = get(ctx);
-            synchronized (lock) { return t.generate(text, sid, speed); }
+            synchronized (lock) { return raw(t, text, sid, speed); }
         }
+
+        float[] refAudio;
+        int steps = 3;
+
+        private GeneratedAudio raw(OfflineTts t, String text, int sid, float speed) {
+            if (this != FISH) return t.generate(text, sid, speed);
+            GenerationConfig g = new GenerationConfig();
+            g.setSpeed(speed);
+            g.setSid(0);
+            g.setSilenceScale(0.2f);
+            g.setReferenceAudio(refAudio);
+            g.setReferenceSampleRate(REF_RATE);
+            g.setReferenceText(REF_TEXT);
+            g.setNumSteps(steps);
+            return t.generateWithConfig(text, g);
+        }
+    }
+
+    /** What the reference clip says (made with Fish Audio). */
+    static final String REF_TEXT = "Hello, I'm Miku-san. Alley vortex qema tick.";
+    static final int REF_RATE = 24000;
+
+    /** Reads a 16-bit mono WAV into floats. */
+    static float[] readWav(File f) throws Exception {
+        byte[] b = new byte[(int) f.length()];
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            int off = 0, n;
+            while (off < b.length && (n = in.read(b, off, b.length - off)) > 0) off += n;
+        }
+        int p = 12;
+        while (p + 8 <= b.length) {
+            String id = new String(b, p, 4, "US-ASCII");
+            int size = (b[p + 4] & 255) | (b[p + 5] & 255) << 8 | (b[p + 6] & 255) << 16 | (b[p + 7] & 255) << 24;
+            if (id.equals("data")) {
+                int count = Math.min(size, b.length - p - 8) / 2;
+                float[] out = new float[count];
+                for (int i = 0; i < count; i++) {
+                    short v = (short) ((b[p + 8 + 2 * i] & 255) | (b[p + 9 + 2 * i] << 8));
+                    out[i] = v / 32768f;
+                }
+                return out;
+            }
+            p += 8 + size + (size & 1);
+        }
+        throw new Exception("reference clip has no audio");
     }
 
     static final Engine FAST = new Engine("Fast", "voice-fast", "voice-fast-v1", 22050,
             "model.onnx", "tokens.txt");
-    static final Engine HD = new Engine("HD", "kokoro", "kokoro-v2", 24000,
-            "model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt");
+    static final Engine FISH = new Engine("Fish", "voice-fish", "voice-fish-v1", 24000,
+            "encoder.int8.onnx", "decoder.int8.onnx", "vocos_24khz.onnx", "tokens.txt", "lexicon.txt", "ref.wav");
 
     /** Loads the engine for this voice in the background (fast engine always). */
+    private static volatile boolean cleaned = false;
+
     static void prepareAsync(Context ctx, String voice) {
+        if (!cleaned) {
+            cleaned = true;
+            final File files = ctx.getFilesDir();
+            new Thread(() -> {   // free the space the old HD voices used
+                for (String old : new String[]{"kokoro-v1", "kokoro-v2"}) {
+                    File o = new File(files, old);
+                    if (o.exists()) deleteAll(o);
+                }
+            }, "miku-voice-cleanup").start();
+        }
         FAST.prepareAsync(ctx);
         Style st = style(voice);
-        if (st != null && st.engine == HD) HD.prepareAsync(ctx);
+        if (st != null && st.engine == FISH) FISH.prepareAsync(ctx);
     }
 
     /** "ready", "loading" or why it can't work, for this voice. */
@@ -175,7 +239,7 @@ final class LocalVoice {
         AssetManager am = ctx.getAssets();
         long free = ctx.getFilesDir().getUsableSpace();
         if (free < 200L * 1024 * 1024) throw new Exception("not enough free storage (" + (free >> 20) + " MB free)");
-        for (String old : new String[]{"kokoro-v1"}) {
+        for (String old : new String[]{"kokoro-v1", "kokoro-v2"}) {   // the old HD voices
             File o = new File(ctx.getFilesDir(), old);
             if (o.exists()) deleteAll(o);
         }

@@ -13,8 +13,9 @@ const DEFAULTS := {
 	"user_name": "friend",
 	"persona": "Warm, playful and curious. Teases gently, laughs easily, and genuinely wants to hear about my day. Honest with me even when it isn't what I want to hear. Talks casually like a close friend, and is happy to mix in a little Telugu or Hindi when I do.",
 	"voice_on": true,
-	"voice": "Miku",
+	"voice": "Fish",
 	"voice_v11": true,
+	"voice_v13": true,
 	"barge_in": true,
 }
 
@@ -91,10 +92,11 @@ var sharing := false
 var screen_btn: Button
 var overlay_row: HBoxContainer
 var level_bar: Panel
-const VOICES := [["Miku", "Miku: cute & instant (on phone)"], ["Sunny", "Sunny: cheerful & instant (on phone)"],
-	["MikuHD", "Miku HD: anime girl (on phone, slower)"], ["Sweet", "Sweet HD (on phone, slower)"], ["Bubbly", "Bubbly HD (on phone, slower)"], ["Kawaii", "Kawaii HD: extra high (on phone, slower)"], ["Heart", "Heart HD: natural English (on phone, slower)"],
+const VOICES := [["Fish", "Miku's own voice (Fish Audio)"], ["Miku", "Miku: cute & instant (on phone)"], ["Sunny", "Sunny: cheerful & instant (on phone)"],
 	["Leda", "Leda (online)"], ["Aoede", "Aoede (online)"], ["Zephyr", "Zephyr (online)"], ["Laomedeia", "Laomedeia (online)"], ["Despina", "Despina (online)"], ["Kore", "Kore (online)"]]
-const LOCAL_VOICES := ["Miku", "Sunny", "MikuHD", "Sweet", "Bubbly", "Kawaii", "Heart"]   # made on the phone itself: offline, no limits
+const LOCAL_VOICES := ["Fish", "Miku", "Sunny"]
+const FISH_LABEL := "Voice: Built with Fish Audio"
+var fish_lbl: Label   # made on the phone itself: offline, no limits
 var local_id := 0          # which on-device speech is current
 var vs_local := false
 var vs_voice := ""      # the current voice stream comes from the phone, not the server
@@ -1021,7 +1023,7 @@ func setup_live(singleton: Object = null) -> void:
 func _selftest(kind: String) -> void:
 	print("SELFTEST start ", kind)
 	settings.voice_on = true
-	for v in ["Miku", "Sunny", "MikuHD"]:
+	for v in ["Fish", "Miku"]:
 		settings.voice = v
 		live.prepareVoice(v)
 		for i in 90:
@@ -1238,7 +1240,7 @@ func _fix_old_voice() -> void:
 		if v[0] == settings.get("voice", ""):
 			known = true
 	if not known:
-		settings.voice = "Miku"
+		settings.voice = "Fish"     # e.g. the removed HD voices
 
 
 func load_state() -> void:
@@ -1247,7 +1249,7 @@ func load_state() -> void:
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(STATE_PATH))
 	var from_before_v11 := false
 	if parsed is Dictionary:
-		from_before_v11 = not parsed.get("settings", {}).has("voice_v11")
+		from_before_v11 = not parsed.get("settings", {}).has("voice_v13")
 		for k in parsed.get("settings", {}):
 			settings[k] = parsed.settings[k]
 		for h in parsed.get("history", []):
@@ -1257,9 +1259,10 @@ func load_state() -> void:
 			if m is String:
 				memories.append(m)
 	if from_before_v11:
-		settings.voice = "Miku"      # v11: everyone starts on her new on-phone voice once
-		settings.voice_v11 = true
+		settings.voice = "Fish"      # v13: everyone starts on her own Fish Audio voice once
+		settings.voice_v13 = true
 	_fix_old_voice()
+	update_fish_label()
 
 
 func save_state() -> void:
@@ -1297,6 +1300,12 @@ func make_button(text: String, cb: Callable, fill := GLASS, fg := INK) -> Button
 	style_button(b, fill, fg)
 	b.pressed.connect(cb)
 	return b
+
+
+## The "Built with Fish Audio" tag shows whenever her Fish Audio voice is in use.
+func update_fish_label() -> void:
+	if fish_lbl != null:
+		fish_lbl.visible = settings.voice_on and settings.get("voice", "") == "Fish"
 
 
 func label(text: String, size: int, color: Color) -> Label:
@@ -1340,6 +1349,9 @@ func build_ui() -> void:
 	mood_lbl = label("happy", 18, MIST)
 	names.add_child(title_lbl)
 	names.add_child(mood_lbl)
+	fish_lbl = label(FISH_LABEL, 15, INK)
+	names.add_child(fish_lbl)
+	update_fish_label()
 	top.add_child(names)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1464,6 +1476,7 @@ func toggle_voice() -> void:
 	voice_btn.text = "Voice on" if settings.voice_on else "Voice off"
 	if not settings.voice_on:
 		stop_speaking()
+	update_fish_label()
 	save_state()
 
 
@@ -1529,6 +1542,9 @@ func open_settings() -> void:
 	vpick.add_theme_font_size_override("font_size", 20)
 	vpick.add_theme_stylebox_override("normal", box(FIELD, 14, Vector4(14, 10, 14, 10)))
 	vpick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vpick.fit_to_longest_item = false
+	vpick.clip_text = true
+	vpick.custom_minimum_size.x = 120
 	for i in VOICES.size():
 		vpick.add_item(VOICES[i][1], i)
 		if VOICES[i][0] == settings.get("voice", "Leda"):
@@ -1541,12 +1557,16 @@ func open_settings() -> void:
 		speak_reply("Hi %s! This is how I sound." % settings.user_name)
 		settings.voice = keep))
 	col.add_child(vrow)
+	var fish_note := label("Miku's own voice is Built with Fish Audio (fish.audio).", 17, INK)
+	fish_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(fish_note)
 	vpick.item_selected.connect(func(i):
 		# a new voice takes effect right away (no need to press Save)
 		settings.voice = VOICES[i][0]
 		save_state()
 		if live != null:
 			live.prepareVoice(settings.voice)
+		update_fish_label()
 		if live_on:
 			live.updateContext(live_config()))
 	fields["voice"] = vpick
@@ -1583,7 +1603,7 @@ func open_settings() -> void:
 	dr.add_child(make_button("Test server", check_server))
 	var copy_btn := make_button("Copy report", func(): pass)
 	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set("Miku-san v12 mic check\n" + diagnostics())
+		DisplayServer.clipboard_set("Miku-san v13 mic check\n" + diagnostics())
 		copy_btn.text = "Copied!")
 	dr.add_child(copy_btn)
 	if live != null:
@@ -1633,6 +1653,6 @@ func open_settings() -> void:
 		open_settings())
 	r2.add_child(forget)
 	col.add_child(r2)
-	var credit := label("Model \"Medievel Blue Hair Full Sleeve\" by Poonam Bajaj (VRoid Studio)", 13, MIST)
+	var credit := label("Model \"Medievel Blue Hair Full Sleeve\" by Poonam Bajaj (VRoid Studio). Voice: Built with Fish Audio.", 13, MIST)
 	credit.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	col.add_child(credit)

@@ -27,7 +27,7 @@ jobs:
         with:
           gradle-version: "8.5"
 
-      - name: Get her on-device voice (Kokoro via sherpa-onnx)
+      - name: Get her on-device voices (sherpa-onnx)
         run: |
           SV=1.12.40
           curl -sSL --retry 5 -o sherpa.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SV}/sherpa-onnx-${SV}.aar"
@@ -37,14 +37,18 @@ jobs:
           zip -q -d sherpa.aar 'jni/x86/*' 'jni/*/libsherpa-onnx-c-api.so' 'jni/*/libsherpa-onnx-cxx-api.so' || true
           cp sherpa.aar addons/sherpa-onnx.aar
           unzip -l addons/sherpa-onnx.aar
-          curl -sSL --retry 5 -o kokoro.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
-          tar xjf kokoro.tar.bz2
-          S=kokoro-int8-multi-lang-v1_0
-          A=android-plugin/miku-live/src/main/assets/kokoro
+          # her own voice, built with Fish Audio: ZipVoice copies it from the short clip in assets/voice-fish-ref
+          curl -sSL --retry 5 -o zv.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2"
+          tar xjf zv.tar.bz2
+          Z=sherpa-onnx-zipvoice-distill-int8-zh-en-emilia
+          A=android-plugin/miku-live/src/main/assets/voice-fish
           mkdir -p "$A/espeak-ng-data"
-          cp $S/model.int8.onnx $S/voices.bin $S/tokens.txt $S/lexicon-us-en.txt $S/LICENSE "$A/"
-          (cd $S/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$A/espeak-ng-data/")
-          rm -rf $S kokoro.tar.bz2 sherpa.aar
+          cp $Z/encoder.int8.onnx $Z/decoder.int8.onnx $Z/tokens.txt $Z/lexicon.txt "$A/"
+          curl -sSL --retry 5 -o "$A/vocos_24khz.onnx" "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx"
+          mv android-plugin/miku-live/src/main/assets/voice-fish-ref/ref.wav "$A/ref.wav"
+          rmdir android-plugin/miku-live/src/main/assets/voice-fish-ref
+          (cd $Z/espeak-ng-data && cp -r phondata phondata-manifest phonindex phontab intonations en_dict lang voices "$GITHUB_WORKSPACE/$A/espeak-ng-data/")
+          rm -rf $Z zv.tar.bz2 sherpa.aar
           du -sh "$A"
           # her fast voice (Piper, many speakers): makes speech much faster than real time
           curl -sSL --retry 5 -o fast.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-libritts_r-medium.tar.bz2"
